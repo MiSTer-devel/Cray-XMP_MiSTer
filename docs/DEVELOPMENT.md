@@ -428,15 +428,56 @@ again (`expdisk.py rm`).
 
 - **The first character of a printed line is not printed**: it tells the
   printer how far to move the paper. Start every line with a blank.
-- What a program built with the kit's runtime writes to `$OUT` is printed
-  when it runs in a job. In an interactive session it does not reach the
-  screen, which is why FORTRAN and LISP are run as jobs too.
+- What a program writes to `$OUT` is printed when it runs in a job. In an
+  interactive session the station shows it, and shows `?` while the program
+  reads a line of `$IN`, if the program was built with the image
+  (`tools/ack/ack-cos.patch`: the kit's C library reads and writes an
+  interactive dataset with COS's circular I/O, the only requests such a
+  dataset takes; `read` then returns a line at a time and `isatty` says the
+  dataset is a terminal). The libraries on the package's drive
+  ([software/cos-tools](../software/cos-tools/README.md)) are the kit's as
+  it was, so a program compiled on the machine itself still shows nothing
+  in a session, which is why FORTRAN and LISP are run as jobs there.
+- A large program gets little room for its heap and stack from COS: the
+  loader asks for the program alone, and only a small program inherits room
+  from the control statement processor before it. The image's startup code
+  asks COS for memory when fewer than 40,960 words are free (the same
+  patch). Without it a program of a million words could not open a file.
+- A FORTRAN direct access file (`ACCESS='DIRECT'`, `REC=`) is held in memory
+  while it is open: read whole at `OPEN`, written whole at `CLOSE` or when
+  the program ends, because the kit reads and writes a COS dataset in
+  sequence. It has to fit in the heap, and a program that is aborted does
+  not write it back.
 - The kit also compiles Pascal and BASIC. A first program in each did not
   link here (`Unsatisfied external reference`), and that was not followed up.
 - On Linux the assembler of COS-Tools needs the one-line change the
   Dockerfile makes, or the kit's C library does not assemble. On macOS it
   builds as it is; the kit itself needs what
   [software/cos-tools](../software/cos-tools/README.md) says.
+
+## Programs in FORTRAN
+
+The same image has COS-Tools' FORTRAN 77 compiler as a cross-compiler,
+`kftc`, with `cft77` to compile, assemble and link in one go:
+
+```sh
+docker run --rm -v "$PWD":/work cray-ack cft77 prog      # prog.f to prog.abs
+```
+
+`kftc -H` takes FORTRAN IV habits: a character constant where a number is
+expected is a Hollerith constant, left-justified and blank-filled in a word,
+and one passed to a routine is passed as words; a format may be held in an
+integer array. `tools/ack/cos-tools-fortran.patch` adds that mode and what
+else the compiler and its runtime lacked for such programs: `PRINT f` with
+no list, `RETURN` with an expression, A input into a word left-justified,
+direct access records (the record number was ignored), a fresh record after
+a `/` at the end of a format, and room for formats of 256 descriptors.
+Two games are built with it, in a repository of their own,
+[Cray-COS-Games](https://github.com/jakesjews/Cray-COS-Games): Super Star
+Trek of 1983, whose `prime2cray.py` shows what else such a program needs
+before the compiler takes it, and Cray Blitz, the chess program of 1991,
+whose `blitz2cray.py` and `lib/blitz.c` show what a Cray program of the time
+needs (the bit intrinsics and RANF as functions, the clocks).
 
 ## Testing on a MiSTer
 

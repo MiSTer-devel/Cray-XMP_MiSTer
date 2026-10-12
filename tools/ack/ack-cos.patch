@@ -1,0 +1,423 @@
+diff --color -ruN a/plat/cos/boot.s b/plat/cos/boot.s
+--- a/plat/cos/boot.s	2026-10-11 19:11:58.182648475 -0400
++++ b/plat/cos/boot.s	2026-10-11 19:23:47.145250759 -0400
+@@ -11,6 +11,16 @@
+ * System function numbers
+ F$ADV:    = 0                ; advance to next job step
+ F$ABT:    = 1                ; abort job
++F$MEMORY: = O'073            ; request memory
++
++* The heap grows up from the program's high limit and the stack down from
++* the system's tables at the top of the field length.  COS leaves a small
++* program the field length of its control statement processor, which is
++* room enough, but a program larger than that gets a few thousand words
++* and cannot open a file.  When fewer than this many words are free at
++* the start, the rest is asked for: COS adds it to the end of the user
++* area, which moves the high limit and the tables up.
++MIN%FREE: = O'120000
+ 
+           ext      @%ftFini
+           ext      @%ftInit
+@@ -21,6 +31,27 @@
+ %%start:  =        *
+           start    %%start
+ *
++*  The heap begins at the program's high limit.  Ask for memory when
++*  too little is free above it.
++*
++          s2       <24
++          s1       JCHLM,    ; high limit of the program
++          s1       s1>24
++          s1       s1&s2
++          heapb,   s1
++          s3       JCLFT,    ; base of the system-managed LFT's
++          s3       s3&s2
++          s3       s3-s1     ; words free between them
++          s1       MIN%FREE
++          s0       s3-s1
++          jsp      %%init    ; if enough
++          s1       s1-s3     ; words to add to the user area
++          memreq,  s1
++          s1       memreq
++          s0       F$MEMORY
++          ex
++%%init:   =        *
++*
+ *  Initialize local base, stack pointer, and heap pointer
+ *
+           s1       JCLFT,    ; preset stack pointer to base of system-managed LFT's
+@@ -30,9 +61,7 @@
+           s3       s3-s1
+           a7       s3
+           a6       a7        ; preset local base to stack pointer
+-          s1       JCHLM,    ; preset heap pointer to current field length
+-          s1       s1>24
+-          s3       s1&s2
++          s3       heapb,    ; preset heap pointer to the program's high limit
+           a5       s3
+ *
+ *  Parse command line arguments
+@@ -119,6 +148,8 @@
+ *  Storage for argc, argv, and the envp array.
+ 
+ bss:      section  data
++heapb:    bss      1
++memreq:   bss      1
+ argc:     bss      1
+ argv:     bssz     MAX%ARGS+1
+ envp:     bssz     1
+diff --color -ruN a/plat/cos/include/sys/files.h b/plat/cos/include/sys/files.h
+--- a/plat/cos/include/sys/files.h	2026-10-11 12:31:11.234135899 -0400
++++ b/plat/cos/include/sys/files.h	2026-10-11 12:31:47.904938105 -0400
+@@ -82,11 +82,13 @@
+ int     _coscls(ODN *odn);
+ int     _cosdnt(DDL *ddl);
+ int     _cosopn(ODN *odn, int pd);
++u64     _cosrdc(DSP *dsp);
+ int     _cosrdp(FtEntry *entry, void *uda, int ct);
+ int     _cosrew(FtEntry *entry);
+ int     _cosrls(ODN *odn);
+ void    _cosrst(FtEntry *entry);
+ int     _coswdr(FtEntry *entry, void *uda, int ct, int unusedBits);
++u64     _coswdc(DSP *dsp);
+ int     _coswdp(FtEntry *entry, void *uda, int ct);
+ int     _coswed(FtEntry *entry);
+ int     _coswef(FtEntry *entry);
+diff --color -ruN a/plat/cos/libsys/build.lua b/plat/cos/libsys/build.lua
+--- a/plat/cos/libsys/build.lua	2026-10-11 12:31:11.231998905 -0400
++++ b/plat/cos/libsys/build.lua	2026-10-11 12:31:47.904708981 -0400
+@@ -58,6 +58,7 @@
+ 		"./cosdnt.s",
+ 		"./cosopn.s",
+ 		"./cosrdp.s",
++		"./cosrdc.s",
+ 		"./cosrew.s",
+ 		"./cosrls.s",
+ 		"./costim.s",
+diff --color -ruN a/plat/cos/libsys/cosrdc.s b/plat/cos/libsys/cosrdc.s
+--- a/plat/cos/libsys/cosrdc.s	1969-12-31 19:00:00.000000000 -0500
++++ b/plat/cos/libsys/cosrdc.s	2026-10-11 12:31:11.236860600 -0400
+@@ -0,0 +1,51 @@
++#include "cos.h"
++
++text:    section   code
++
++**
++*  @%cosrdc - read circular into the buffer of a dataset
++*  @%coswdc - write circular from the buffer of a dataset
++*
++*  Circular I/O is what an interactive dataset takes (buffered I/O,
++*  F$BIO, is refused on one).  The request is made with automatic
++*  recall, and the job is recalled until the busy flag of the DSP is
++*  clear, so that on return the system has taken or delivered what it
++*  will: the DSP's in and out pointers are up to date.
++*
++*  Entry
++*    (SP)   : byte pointer to the DSP
++*
++*  Exit
++*    S7 : word 1 of the DSP (the busy, error and end-of-data flags)
++*
++         entry     @%cosrdc
++@%cosrdc:ENTER
++         s1        1,a7           ; byte address of the DSP
++         s1        s1>3           ; word address
++         s2        1
++         s2        s2<63          ; automatic recall
++         s1        s1!s2
++         s0        F$RDC
++         ex
++         j         cio1
++
++         entry     @%coswdc
++@%coswdc:ENTER
++         s1        1,a7           ; byte address of the DSP
++         s1        s1>3           ; word address
++         s2        1
++         s2        s2<63          ; automatic recall
++         s1        s1!s2
++         s0        F$WDC
++         ex
++cio1:    s1        1,a7
++         s1        s1>3
++         a1        s1
++         s0        1,a1           ; DPBSY is the sign bit of word 1
++         jsp       cio2           ; not busy: the request is complete
++         RECALL    A1
++         j         cio1
++cio2:    s7        1,a1
++         RETURN
++
++         end
+diff --color -ruN a/plat/cos/libsys/isatty.c b/plat/cos/libsys/isatty.c
+--- a/plat/cos/libsys/isatty.c	2026-10-11 12:31:11.231817864 -0400
++++ b/plat/cos/libsys/isatty.c	2026-10-11 12:31:11.236663059 -0400
+@@ -1,8 +1,20 @@
+ #include <errno.h>
+ #include <stdlib.h>
+ #include <unistd.h>
++#include <sys/files.h>
+ 
++/*
++ *  A dataset is a terminal when COS says it is interactive (DPIA in
++ *  word 1 of its DSP): the input and output of a job that runs in an
++ *  interactive session are.  stdio then buffers stdout by lines.
++ */
+ int isatty(int fd)
+ {
+-    return 0;
++    DSP *dsp;
++    FtEntry *entry;
++
++    entry = _ftPtr(fd);
++    if (entry == NULL || entry->allocated == 0) return 0;
++    dsp = _getdsp(entry);
++    return (int)((dsp->first >> 28) & 1);
+ }
+diff --color -ruN a/plat/cos/libsys/read.c b/plat/cos/libsys/read.c
+--- a/plat/cos/libsys/read.c	2026-10-11 12:31:11.231451531 -0400
++++ b/plat/cos/libsys/read.c	2026-10-11 12:31:47.905178146 -0400
+@@ -4,6 +4,80 @@
+ #include <unistd.h>
+ #include <sys/files.h>
+ 
++/*
++ *  An interactive dataset (DPIA, bit 35 of word 1 of its DSP) takes
++ *  circular I/O only: buffered I/O (F$BIO) is refused on it.  The
++ *  system fills the buffer with COS-blocked data, which is unblocked
++ *  here: a block control word (first byte zero) is skipped, a record
++ *  control word (top bit set, mode in bits 0-3: 10 octal end of record
++ *  with the unused bit count in bits 4-9, 16 end of file, 17 end of
++ *  data) ends the segment, and every other word is data.  The forward
++ *  indexes of the control words are not trusted; interactive input
++ *  leaves them zero.
++ */
++#define DSP_IA(dsp) ((((dsp)->first) >> 28) & 1)
++#define DSP_ADDR(w) ((w) & 0xffffff)
++
++static int readCircular(FtEntry *entry, DSP *dsp) {
++    u64 first;
++    u64 in;
++    u64 limit;
++    int mode;
++    int n;
++    u64 out;
++    u64 w;
++    u64 w1;
++
++    entry->out = entry->in = 0;
++    entry->unusedBits = 0;
++    first = DSP_ADDR(dsp->first);
++    limit = DSP_ADDR(dsp->limit);
++    n = 0;
++    for (;;) {
++        in  = DSP_ADDR(dsp->in);
++        out = DSP_ADDR(dsp->out);
++        if (in == out) { /* the buffer is empty: ask for more */
++            w1 = _cosrdc(dsp);
++            if ((w1 & (1UL << 62)) != 0) { /* DPEOI: end of data */
++                entry->status = COS_EOD;
++                break;
++            }
++            if (((w1 >> 51) & 0xfff) != 0) {
++                errno = EIO;
++                return -1;
++            }
++            continue;
++        }
++        w = *(u64 *)_wp2bp(out);
++        out += 1;
++        if (out >= limit) out = first;
++        dsp->out = (dsp->out & ~0xffffffUL) | out;
++        if ((w >> 63) != 0) { /* a record control word */
++            mode = (int)((w >> 60) & 7);
++            if (mode == 0) {
++                entry->status = COS_EOR;
++                entry->unusedBits = (w >> 54) & 0x3f;
++            }
++            else if (mode == 6) {
++                entry->status = COS_EOF;
++            }
++            else {
++                entry->status = COS_EOD;
++            }
++            break;
++        }
++        if ((w >> 56) == 0) continue; /* a block control word */
++        memcpy(entry->uda + n * 8, &w, 8);
++        n += 1;
++        if (n >= COS_UDA_SIZE) break; /* a partial record */
++    }
++    entry->in = n * 8;
++    if (entry->status == COS_EOR) {
++        entry->in -= entry->unusedBits >> 3;
++    }
++    return n;
++}
++
+ static int readNextSegment(FtEntry *entry) {
+     u8 cwf;
+     DSP *dsp;
+@@ -11,9 +85,11 @@
+ 
+     entry->out = entry->in = 0;
+ 
++    dsp = _getdsp(entry);
++    if (DSP_IA(dsp)) return readCircular(entry, dsp);
++
+     n = _cosrdp(entry, entry->uda, COS_UDA_SIZE);
+ 
+-    dsp = _getdsp(entry);
+     cwf = dsp->cwf >> 60;
+     if ((cwf & 1) != 0)
+         entry->status = COS_EOD;
+@@ -39,6 +115,7 @@
+     u8 b;
+     u8 *bp;
+     FtEntry *entry;
++    int isInteractive;
+     u8 *limit;
+     int n;
+ 
+@@ -53,6 +130,7 @@
+ 
+     if ((entry->access & O_BINARY) == 0) { // text mode
+ 
++        isInteractive = DSP_IA(_getdsp(entry));
+         while (bp < limit) {
+             if (entry->blankCount > 0) {
+                 *bp++ = ' ';
+@@ -63,6 +141,7 @@
+                     *bp++ = '\n';
+                     entry->status = 0;
+                     entry->blankCount = 0;
++                    if (isInteractive) break; /* a line at a time, as a terminal gives */
+                 }
+ 
+                 if (entry->status != 0) break;
+diff --color -ruN a/plat/cos/libsys/write.c b/plat/cos/libsys/write.c
+--- a/plat/cos/libsys/write.c	2026-10-11 12:31:11.231643864 -0400
++++ b/plat/cos/libsys/write.c	2026-10-11 12:31:47.905405145 -0400
+@@ -7,7 +7,49 @@
+ 
+ #define MAX_LOG_MSG_SIZE 128
+ 
++/*
++ *  An interactive dataset (DPIA, bit 35 of word 1 of its DSP) takes
++ *  circular I/O only: buffered I/O (F$BIO) is refused on it.  The data
++ *  goes into the buffer COS-blocked, as the system itself delivers
++ *  interactive input: a block control word whose forward index counts
++ *  the data words, the data, and a record control word (mode 10 octal,
++ *  end of record, with the unused bit count of the last word in bits
++ *  4-9 and a forward index of zero).  Every write makes a record, so a
++ *  partial write of a full data area breaks a line there.
++ */
++#define DSP_IA(dsp) ((((dsp)->first) >> 28) & 1)
++#define DSP_ADDR(w) ((w) & 0xffffff)
++
++static void putWord(DSP *dsp, u64 *in, u64 w) {
++    *(u64 *)_wp2bp(*in) = w;
++    *in += 1;
++    if (*in >= DSP_ADDR(dsp->limit)) *in = DSP_ADDR(dsp->first);
++}
++
++static int writeCircular(FtEntry *entry, DSP *dsp, int wc, int unusedBits) {
++    int i;
++    u64 in;
++    u64 w;
++    u64 w1;
++
++    in = DSP_ADDR(dsp->in);
++    putWord(dsp, &in, (u64)wc);
++    for (i = 0; i < wc; i++) {
++        memcpy(&w, entry->uda + i * 8, 8);
++        putWord(dsp, &in, w);
++    }
++    putWord(dsp, &in, (010UL << 60) | ((u64)unusedBits << 54));
++    dsp->in = (dsp->in & ~0xffffffUL) | in;
++    w1 = _coswdc(dsp);
++    if (((w1 >> 51) & 0xfff) != 0) {
++        errno = EIO;
++        return -1;
++    }
++    return wc;
++}
++
+ int _ftFlsh(FtEntry *entry) {
++    DSP *dsp;
+     int i;
+     int n;
+     int unusedBytes;
+@@ -22,7 +64,15 @@
+         wc = (entry->in + 7) >> 3;
+         unusedBytes = (8 - (entry->in & 7)) & 7;
+         for (i = 0; i < unusedBytes; i++) entry->uda[entry->in + i] = 0;
+-        if (_coswdr(entry, entry->uda, wc, unusedBytes << 3) != wc) {
++        dsp = _getdsp(entry);
++        if (DSP_IA(dsp)) {
++            if (writeCircular(entry, dsp, wc, unusedBytes << 3) != wc) {
++                entry->in = 0;
++                errno = EIO;
++                return -1;
++            }
++        }
++        else if (_coswdr(entry, entry->uda, wc, unusedBytes << 3) != wc) {
+             entry->in = 0;
+             errno = EIO;
+             return -1;
+@@ -41,6 +91,27 @@
+     return _ftFlsh(entry) >= 0 ? 0 : -1;
+ }
+ 
++/* The data area is full: write it as a partial record. */
++static int putFull(FtEntry *entry) {
++    DSP *dsp;
++
++    dsp = _getdsp(entry);
++    if (DSP_IA(dsp)) {
++        if (writeCircular(entry, dsp, COS_UDA_SIZE, 0) != COS_UDA_SIZE) {
++            entry->in = 0;
++            errno = EIO;
++            return -1;
++        }
++    }
++    else if (_coswdp(entry, entry->uda, COS_UDA_SIZE) != COS_UDA_SIZE) {
++        entry->in = 0;
++        errno = EIO;
++        return -1;
++    }
++    entry->in = 0;
++    return 0;
++}
++
+ ssize_t write(int fd, void *buffer, size_t count) {
+     u8 *bp;
+     u8 byte;
+@@ -68,12 +139,7 @@
+             entry->position += n;
+             if (entry->position > entry->maxPosition) entry->maxPosition = entry->position;
+             if (entry->in >= COS_UDA_SIZE_BYTES) {
+-                if (_coswdp(entry, entry->uda, COS_UDA_SIZE) != COS_UDA_SIZE) {
+-                    entry->in = 0;
+-                    errno = EIO;
+-                    return -1;
+-                }
+-                entry->in = 0;
++                if (putFull(entry) < 0) return -1;
+             }
+         }
+     }
+@@ -92,12 +158,7 @@
+                 entry->position += 1;
+                 if (entry->position > entry->maxPosition) entry->maxPosition = entry->position;
+                 if (entry->in >= COS_UDA_SIZE_BYTES && !IS_STDERR(entry)) {
+-                    if (_coswdp(entry, entry->uda, COS_UDA_SIZE) != COS_UDA_SIZE) {
+-                        entry->in = 0;
+-                        errno = EIO;
+-                        return -1;
+-                    }
+-                    entry->in = 0;
++                    if (putFull(entry) < 0) return -1;
+                 }
+             }
+         }

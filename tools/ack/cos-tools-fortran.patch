@@ -1,0 +1,1037 @@
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/codegen.c b/fortran/codegen.c
+--- a/fortran/codegen.c	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/codegen.c	2026-10-11 20:42:01.117985353 -0400
+@@ -408,6 +408,17 @@
+     emitRestoreRegs(mask);
+ }
+ 
++/*
++ *  Make a string reference of the word address in a register: the byte
++ *  address of the words, with the number of bytes in the upper half.
++ */
++void emitWordsAsStringRef(OperatorArgument *arg, int nbytes) {
++    emit("         S%o        S%o<3\n", arg->reg, arg->reg);
++    emit("         S7        %d\n", nbytes);
++    emit("         S7        S7<32\n");
++    emit("         S%o        S%o!S7\n", arg->reg, arg->reg);
++}
++
+ void emitConvertToByteAddress(Register reg) {
+     emit("         S%o        S%o<3\n", reg, reg);
+ }
+@@ -958,6 +969,32 @@
+     arg->details.calculation = dt;
+ }
+ 
++/*
++ *  Load the word address of a character constant held as Hollerith words,
++ *  left-justified and blank-filled, for an actual argument in Hollerith mode.
++ */
++void emitLoadHollerithRef(OperatorArgument *arg) {
++    char buf[32];
++    CharacterValue cv;
++
++    arg->reg = allocateRegister();
++    cv = arg->details.constant.value.character;
++    if (cv.length <= 16) {
++        emit("         S%o        =", arg->reg);
++        emitString(&cv, FALSE);
++        emit("\n");
++    }
++    else {
++        generateLabel(buf);
++        emitLabeledString(&cv, buf, FALSE);
++        emit("         S%o        %s\n", arg->reg, buf);
++    }
++    arg->class = ArgClass_Calculation;
++    arg->details.calculation.type = BaseType_Integer;
++    arg->details.calculation.rank = 0;
++    arg->details.calculation.constraint = 0;
++}
++
+ void emitLoadConstInt(Register reg, i64 value) {
+     if (value >= 0 && value <= 07777777) {
+         emit("         S%o        %ld\n", reg, value);
+@@ -1024,8 +1061,10 @@
+     char buf[32];
+     DataType *dt;
+     Symbol *intrinsic;
++    bool isOnce;
+     char *label;
+     u16 mask;
++    char onceLabel[8];
+     char regName[3];
+     Symbol *sym;
+ 
+@@ -1149,6 +1188,20 @@
+         case SymClass_Function:
+         case SymClass_StmtFunction:
+             freeRegister(subject->reg);
++            /*
++             *  The result of a character function of fixed length is given
++             *  its storage at the first reference in a call and keeps it for
++             *  the rest of the call (the prolog clears the slot), so that the
++             *  function can read what it has assigned: a reference used to
++             *  get new storage every time.
++             */
++            isOnce = sym->class == SymClass_Function && sym == progUnitSym
++                  && dt->constraint != -1 && sym->details.progUnit.offset == -1;
++            if (isOnce) {
++                generateLabel(onceLabel);
++                emit("         S0        %d,A6\n", sym->details.progUnit.offset);
++                emit("         JSN       %s\n", onceLabel);
++            }
+             mask = getRegisterMap();
+             emitSaveRegs(mask);
+             if (dt->constraint == -1) {
+@@ -1168,7 +1221,13 @@
+             emitRestoreRegs(mask);
+             emitStoreReg(sym, RESULT_REG);
+             subject->reg = allocateRegister();
+-            emit("         S%o        S7\n", subject->reg);
++            if (isOnce) {
++                emitLabel(onceLabel);
++                emit("         S%o        %d,A6\n", subject->reg, sym->details.progUnit.offset);
++            }
++            else {
++                emit("         S%o        S7\n", subject->reg);
++            }
+             switch (subject->details.reference.offsetClass) {
+             case ArgClass_Undefined:
+                 /* do nothing */
+@@ -1935,6 +1994,10 @@
+     emit("         A6        A7\n");    /* set new base pointer */
+     emit("         A1        %s,\n", isEntry ? progUnitSym->details.progUnit.frameSizeLabel : sym->details.progUnit.frameSizeLabel);
+     emit("         A7        A7-A1\n"); /* reserve space for local variables */
++    if (sym->class == SymClass_Function) {
++        emit("         S7        0\n"); /* no storage yet for a character result */
++        emit("         -1,A6     S7\n");
++    }
+     if (isEntry) {
+         emit("%-8s BSS       0\n", skipLabel);
+     }
+@@ -2113,10 +2176,10 @@
+             }
+             break;
+         case BaseType_Logical:
+-            emit("         CON       %d\n", cListItem->details.value.logical);
++            emit("         CON       %ld\n", (long)cListItem->details.value.logical);
+             break;
+         case BaseType_Integer:
+-            emit("         CON       %d\n", cListItem->details.value.integer);
++            emit("         CON       %ld\n", (long)cListItem->details.value.integer);
+             break;
+         case BaseType_Double:
+         case BaseType_Real:
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/codegen.h b/fortran/codegen.h
+--- a/fortran/codegen.h	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/codegen.h	2026-10-11 20:42:01.141639476 -0400
+@@ -57,6 +57,7 @@
+ void emitCalcTripNeg1(DoStackEntry *entry, BaseType type);
+ void emitCatChar(OperatorArgument *leftArg, OperatorArgument *rightArg);
+ void emitConvertToByteAddress(Register reg);
++void emitWordsAsStringRef(OperatorArgument *arg, int nbytes);
+ void emitCopyAddrReg(Register r1, Register r2);
+ void emitCopyFromOffset(Register r1, Register r2);
+ void emitCopyRegister(Register r1, Register r2);
+@@ -101,6 +102,7 @@
+ void emitLoadByReference(OperatorArgument *ref);
+ void emitLoadByteReference(OperatorArgument *subject, OperatorArgument *object);
+ void emitLoadConst(OperatorArgument *arg);
++void emitLoadHollerithRef(OperatorArgument *arg);
+ void emitLoadConstInt(Register reg, i64 value);
+ void emitLoadConstOffset(OperatorArgument *arg);
+ Register emitLoadFrame(int offset);
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/coercion.c b/fortran/coercion.c
+--- a/fortran/coercion.c	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/coercion.c	2026-10-11 20:42:01.143003934 -0400
+@@ -72,6 +72,7 @@
+ /* Pointer   */ {BaseType_Undefined, BaseType_Undefined, BaseType_Pointer,   BaseType_Pointer,   BaseType_Undefined, BaseType_Undefined, BaseType_Undefined, BaseType_Undefined, BaseType_Undefined}
+ };
+ 
++static BaseType coerceCharToInt(OperatorArgument *arg, BaseType fromType, BaseType toType);
+ static BaseType coerceDoubleToComplex(OperatorArgument *arg, BaseType fromType, BaseType toType);
+ static BaseType coerceDoubleToInt(OperatorArgument *arg, BaseType fromType, BaseType toType);
+ static BaseType coerceDoubleToReal(OperatorArgument *arg, BaseType fromType, BaseType toType);
+@@ -89,7 +90,7 @@
+ static BaseType (*coercionFns[BaseType_Pointer+1][BaseType_Pointer+1])(OperatorArgument *arg, BaseType fromType, BaseType toType) = {
+ /*               Undefined          Character          Logical            Integer             Real                Double              Complex                Label              Pointer            */
+ /* Undefined */ {coerceToUndefined, coerceToUndefined, coerceToUndefined, coerceToUndefined,  coerceToUndefined,  coerceToUndefined,  coerceToUndefined,     coerceToUndefined, coerceToUndefined},
+-/* Character */ {coerceToUndefined, coerceNot,         coerceToUndefined, coerceToUndefined,  coerceToUndefined,  coerceToUndefined,  coerceToUndefined,     coerceToUndefined, coerceToUndefined},
++/* Character */ {coerceToUndefined, coerceNot,         coerceCharToInt,   coerceCharToInt,    coerceToUndefined,  coerceToUndefined,  coerceToUndefined,     coerceToUndefined, coerceToUndefined},
+ /* Logical   */ {coerceToUndefined, coerceToUndefined, coerceNot,         coerceLogicalToInt, coerceToUndefined,  coerceToUndefined,  coerceToUndefined,     coerceToUndefined, coerceToUndefined},
+ /* Integer   */ {coerceToUndefined, coerceToUndefined, coerceToUndefined, coerceNot,          coerceIntToReal,    coerceIntToDouble,  coerceIntToComplex,    coerceToUndefined, coerceNot        },
+ /* Real      */ {coerceToUndefined, coerceToUndefined, coerceToUndefined, coerceRealToInt,    coerceNot,          coerceRealToDouble, coerceRealToComplex,   coerceToUndefined, coerceToUndefined},
+@@ -100,6 +101,10 @@
+ };
+ 
+ BaseType calculateCoercedType(OperatorId op, BaseType leftType, BaseType rightType) {
++    if (doHollerith && (leftType == BaseType_Character) != (rightType == BaseType_Character)) {
++        BaseType other = (leftType == BaseType_Character) ? rightType : leftType;
++        if ((other == BaseType_Integer || other == BaseType_Logical) && op != OP_CAT) return BaseType_Integer;
++    }
+     switch (op) {
+     case OP_EXP:
+     case OP_ADD:
+@@ -135,6 +140,40 @@
+     return toType;
+ }
+ 
++/*
++ *  A Hollerith constant: up to eight characters left-justified in a word
++ *  and blank-filled, as CFT77 holds a character constant in a numeric
++ *  context.  Longer constants are cut to the word.
++ */
++i64 hollerithValue(CharacterValue *cv) {
++    u64 v;
++    int i;
++    u8 c;
++
++    if (cv->length > 8) warn("Hollerith constant longer than 8 characters truncated");
++    v = 0;
++    for (i = 0; i < 8; i++) {
++        c = (i < cv->length && cv->string != NULL) ? (u8)cv->string[i] : (u8)' ';
++        v = (v << 8) | c;
++    }
++    return (i64)v;
++}
++
++static BaseType coerceCharToInt(OperatorArgument *arg, BaseType fromType, BaseType toType) {
++    i64 v;
++
++    if (doHollerith == FALSE || arg->class != ArgClass_Constant) return BaseType_Undefined;
++    v = hollerithValue(&arg->details.constant.value.character);
++    if (arg->details.constant.value.character.string != NULL) free(arg->details.constant.value.character.string);
++    arg->details.constant.dt.type = toType;
++    arg->details.constant.dt.constraint = 0;
++    if (toType == BaseType_Logical)
++        arg->details.constant.value.logical = (u64)v;
++    else
++        arg->details.constant.value.integer = v;
++    return toType;
++}
++
+ static BaseType coerceDoubleToComplex(OperatorArgument *arg, BaseType fromType, BaseType toType) {
+     return toType;
+ }
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/coercion.h b/fortran/coercion.h
+--- a/fortran/coercion.h	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/coercion.h	2026-10-11 20:42:01.119950269 -0400
+@@ -28,6 +28,7 @@
+ #include "types.h"
+ 
+ BaseType calculateCoercedType(OperatorId op, BaseType leftType, BaseType rightType);
++i64 hollerithValue(CharacterValue *cv);
+ BaseType coerceArgument(OperatorArgument *arg, BaseType fromType, BaseType toType);
+ 
+ #endif
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b/fortran/compile.c
+--- a/fortran/compile.c	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/compile.c	2026-10-11 20:42:01.117588936 -0400
+@@ -228,6 +228,7 @@
+ static char lineBuf[MAX_LINE_LENGTH+1];
+ static ParsingState state;
+ 
++static bool hollerithArgs = FALSE;
+ static OperatorArgument argStack[MAX_ARG_STACK_SIZE];
+ static int argStkPtr = 0;
+ static DoStackEntry doStack[MAX_DO_STACK_SIZE];
+@@ -1145,6 +1146,21 @@
+         freeRegister(result.reg);
+         formatter = "@_prsfmt";
+     }
++    else if (dt->type == BaseType_Integer
++             && (result.class == ArgClass_Auto || result.class == ArgClass_Static
++                 || result.class == ArgClass_Global || result.class == ArgClass_Argument
++                 || result.class == ArgClass_Adjustable || result.class == ArgClass_Pointee)) {
++        /*
++         *  A format held in an integer variable or array, as Hollerith
++         *  text: the words from the reference on are the format string.
++         */
++        sym = result.details.reference.symbol;
++        emitLoadReference(&result, NULL);
++        emitWordsAsStringRef(&result, calculateSize(sym) * 8);
++        emitPushReg(result.reg);
++        freeRegister(result.reg);
++        formatter = "@_prsfmt";
++    }
+     else {
+         err("Format specification is not character type or FORMAT label");
+         if (isCalculation(result)) freeRegister(result.reg);
+@@ -1159,6 +1175,7 @@
+ static bool evaluateFunction(Token *fn, Symbol *symbol, Symbol *intrinsic) {
+     DataType *dt;
+     int frameSize;
++    bool holl;
+     int n;
+     int parmIdx;
+     int pass;
+@@ -1173,6 +1190,7 @@
+     emitSaveRegs(registerMap);
+     enableEmission(FALSE);
+     varArgIncr = 0;
++    holl = doHollerith && intrinsic == NULL;
+     if (intrinsic != NULL) {
+         intrinsic = matchIntrinsic(fn, intrinsic);
+         if (intrinsic == NULL) {
+@@ -1216,7 +1234,10 @@
+                         frameSize += 1;
+                     }
+                     else {
+-                        emitLoadConst(&result);
++                        if (holl)
++                            emitLoadHollerithRef(&result);
++                        else
++                            emitLoadConst(&result);
+                         freeCharValue(&result.details.constant.value);
+                         emitStoreStack(result.reg, parmIdx);
+                         freeRegister(result.reg);
+@@ -1901,6 +1922,10 @@
+         if (isLoadable(leftArg)) loadValue(&leftArg);
+         if (leftType  != argType) leftType  = coerceArgument(&leftArg,  leftType,  argType);
+         if (rightType != argType) rightType = coerceArgument(&rightArg, rightType, argType);
++        if (doHollerith && (leftType == BaseType_Undefined || rightType == BaseType_Undefined)) {
++            err("Invalid type combination %s/%s to '%s' (only a constant is Hollerith)", baseTypeToStr(getDataType(&leftArg)->type), baseTypeToStr(getDataType(&rightArg)->type), opIdToStr(op));
++            return TRUE;
++        }
+         if (!isConstResult) {
+             if (isConstant(leftArg)) {
+                 emitLoadConst(&leftArg);
+@@ -2405,6 +2430,22 @@
+     emitAdjustSP(2);
+ }
+ 
++/*
++ *  The record a direct access transfer begins at (REC=): the runtime is
++ *  told before the transfer starts.  The unit is in stack slot 0; slot 1
++ *  is free until the first list item.
++ */
++static void emitSetRecord(ControlInfoList *ciList) {
++    OperatorArgument rec;
++
++    if (ciList->recordNumber == NULL || ciList->unitType == BaseType_Character) return;
++    if (evaluateExpression(ciList->recordNumber, &rec)) return;
++    loadValue(&rec);
++    emitStoreStack(rec.reg, 1);
++    freeRegister(rec.reg);
++    emitPrimCall("@_setrec");
++}
++
+ static void inputInit(ControlInfoList *ciList) {
+     DataType *dt;
+     OperatorArgument unit;
+@@ -2416,6 +2457,7 @@
+     freeRegister(unit.reg);
+     dt = getDataType(&unit);
+     ciList->unitType = dt->type;
++    emitSetRecord(ciList);
+     if (ciList->unitType == BaseType_Character) {
+         emitPrimCall("@_setrcd");
+     }
+@@ -2741,6 +2783,7 @@
+     freeRegister(unit.reg);
+     dt = getDataType(&unit);
+     ciList->unitType = dt->type;
++    emitSetRecord(ciList);
+     if (ciList->unitType == BaseType_Character) {
+         emitPrimCall("@_setrcd");
+         emitPrimCall("@_inircd");
+@@ -2753,6 +2796,7 @@
+ static char *parseActualArguments(char *s, int *frameSize) {
+     DataType *dt;
+     Token *expression;
++    bool holl;
+     int parmIdx;
+     int pass;
+     Register reg;
+@@ -2762,6 +2806,7 @@
+ 
+     *frameSize = 0;
+     tempIdx = 0;
++    holl = doHollerith && hollerithArgs;
+     start = eatWsp(s + 1);
+     if (*start == ')') return start + 1;
+     enableEmission(FALSE);
+@@ -2787,7 +2832,10 @@
+                             *frameSize += 1;
+                         }
+                         else {
+-                            emitLoadConst(&result);
++                            if (holl)
++                                emitLoadHollerithRef(&result);
++                            else
++                                emitLoadConst(&result);
+                             freeCharValue(&result.details.constant.value);
+                             emitStoreStack(result.reg, parmIdx);
+                             freeRegister(result.reg);
+@@ -5162,7 +5210,8 @@
+     }
+     labelSym = findLabel(lineLabel);
+     if (labelSym != NULL) {
+-        if (labelSym->details.label.class != StmtClass_Executable && labelSym->details.label.class != StmtClass_Format) {
++        if (labelSym->details.label.class != StmtClass_Executable && labelSym->details.label.class != StmtClass_Format
++            && (labelSym->details.label.class != StmtClass_None || labelSym->details.label.forwardRef == FALSE)) {
+             err("Label does not reference executable or FORMAT statement");
+             return;
+         }
+@@ -5261,6 +5310,16 @@
+     }
+     strcpy(name, token.details.identifier.name);
+     sym = findSymbol(name);
++    if (sym == NULL && strcasecmp(name, "EXIT") == 0 && *eatWsp(s) == '\0') {
++        /*
++         *  CALL EXIT ends the program as STOP does.  As a call it reached
++         *  the C library's exit, which took what happened to be on the
++         *  stack for its status, so that the program ended as an abort,
++         *  and without its files closed.
++         */
++        emitExit(0);
++        return;
++    }
+     if (sym == NULL) {
+         sym = addSymbol(name, SymClass_Subroutine);
+     }
+@@ -5271,7 +5330,9 @@
+     frameSize = 0;
+     s = eatWsp(s);
+     if (*s == '(') {
++        hollerithArgs = TRUE;
+         s = parseActualArguments(s, &frameSize);
++        hollerithArgs = FALSE;
+         s = eatWsp(s);
+     }
+     if (*s != '\0') {
+@@ -6528,12 +6589,15 @@
+         return;
+     }
+     s = eatWsp(s);
+-    if (*s != ',') {
++    if (*s == ',') {
++        s += 1;
++    }
++    else if (*s != '\0') { // the output list may be empty
+         err("Comma missing after format specification");
+         freeControlInfoList(ciList);
+         return;
+     }
+-    s = parseIoList(s + 1, FALSE, &ioList);
++    s = parseIoList(s, FALSE, &ioList);
+     if (s != NULL) {
+         ciList->unit = createIntegerConstant(unitNum);
+         outputInit(ciList);
+@@ -6896,12 +6960,14 @@
+             return;
+         }
+         s = eatWsp(s);
+-        if (*s != ',') {
++        if (*s == ',') {
++            s = eatWsp(s + 1);
++        }
++        else if (*s != '\0') { // the input list may be empty
+             err("Comma missing after format specification");
+             freeControlInfoList(ciList);
+             return;
+         }
+-        s = eatWsp(s + 1);
+         ciList->unit = createIntegerConstant(DEFAULT_INPUT_UNIT);
+     }
+     s = parseIoList(s, FALSE, &ioList);
+@@ -6921,7 +6987,27 @@
+     }
+     s = eatWsp(s);
+     if (*s != '\0') {
+-        notSupported("alternate RETURN");
++        /*
++         *  RETURN e selects an alternate return.  Alternate returns are not
++         *  supported, so no program unit has one, and the standard says that
++         *  a value of e outside the range of alternate returns makes the
++         *  RETURN an ordinary one.  So e is checked for form only.
++         */
++        if (*s == '(') {
++            s = eatWsp(s + 1);
++            while (isdigit(*s)) s = eatWsp(s + 1);
++            if (*s != ')' || *eatWsp(s + 1) != '\0') {
++                err("Incorrect RETURN statement");
++                return;
++            }
++        }
++        else {
++            while (isdigit(*s)) s = eatWsp(s + 1);
++            if (*s != '\0') {
++                err("Incorrect RETURN statement");
++                return;
++            }
++        }
+     }
+     emitBranch(progUnitSym->details.progUnit.exitLabel);
+ }
+@@ -7831,6 +7917,12 @@
+     }
+     enableEmission(FALSE);
+     ec = errorCount;
++    /*
++     *  A variable with no type statement has its implicit type from here
++     *  on: without one the values below were taken as they came, and a
++     *  value of another type was written out as if it were of this one.
++     */
++    defineType(symbol);
+     dt = getSymbolType(symbol);
+     type = dt->type;
+     rank = symbol->details.variable.dt.rank;
+@@ -7949,6 +8041,15 @@
+                     cListItem->details.value.integer = (i64)cListItem->details.value.real;
+                     break;
+                 case BaseType_Character:
++                    if (doHollerith) {
++                        i64 hv = hollerithValue(&cListItem->details.value.character);
++                        if (cListItem->details.value.character.string != NULL) free(cListItem->details.value.character.string);
++                        cListItem->details.dt.type = BaseType_Integer;
++                        cListItem->details.value.integer = hv;
++                        break;
++                    }
++                    err("Data value for %s cannot be coerced to INTEGER", symbol->identifier);
++                    return FALSE;
+                 case BaseType_Complex:
+                 default:
+                     err("Data value for %s cannot be coerced to INTEGER", symbol->identifier);
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/global.c b/fortran/global.c
+--- a/fortran/global.c	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/global.c	2026-10-11 20:42:01.143482351 -0400
+@@ -35,6 +35,7 @@
+ bool  doList                = TRUE;
+ bool  doStaticLocals        = TRUE;
+ bool  doStaticLocalsDefault = TRUE;
++bool  doHollerith           = FALSE;
+ int   errorCount            = 0;
+ int   lineNo                = 0;
+ FILE *listingFile           = NULL;
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/intrinsic/amin0.c b/fortran/intrinsic/amin0.c
+--- a/fortran/intrinsic/amin0.c	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/intrinsic/amin0.c	2026-10-11 20:42:01.128361560 -0400
+@@ -8,9 +8,9 @@
+ 
+     count = *((long *)(waddr << 3));
+     va_start(ap, waddr);
+-    res = *((long *)(va_arg(ap, unsigned long)));
++    res = *((long *)(va_arg(ap, unsigned long) << 3));
+     while (--count > 0) {
+-        item = *((long *)(va_arg(ap, unsigned long)));
++        item = *((long *)(va_arg(ap, unsigned long) << 3));
+         if (item < res) res = item;
+     }
+     va_end(ap);
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/intrinsic/isign.c b/fortran/intrinsic/isign.c
+--- a/fortran/intrinsic/isign.c	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/intrinsic/isign.c	2026-10-11 20:42:01.124763561 -0400
+@@ -1,5 +1,6 @@
+ long _iabs(unsigned long waddr);
+ 
+ long _isign(unsigned long waddra, unsigned long waddrb) {
+-    return (*((double *)(waddrb << 3)) >= 0) ? _iabs(waddra) : -(_iabs(waddra));
++    /* the second argument is an integer: taken as a real, its test raises a floating point error */
++    return (*((long *)(waddrb << 3)) >= 0) ? _iabs(waddra) : -(_iabs(waddra));
+ }
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/main.c b/fortran/main.c
+--- a/fortran/main.c	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/main.c	2026-10-11 20:42:01.142153768 -0400
+@@ -81,6 +81,7 @@
+ #define L_KEY "L="
+ #define O_KEY "O="
+ #define S_KEY "S"
++#define H_KEY "H"
+ #define W_KEY "W"
+ #define STDIN  "$IN"
+ #define STDOUT "$OUT"
+@@ -90,6 +91,7 @@
+ #define L_KEY "-l"
+ #define O_KEY "-o"
+ #define S_KEY "-s"
++#define H_KEY "-H"
+ #define W_KEY "-w"
+ #define STDIN  "-"
+ #define STDOUT "-"
+@@ -183,6 +185,9 @@
+         else if (strcmp(argv[i], W_KEY) == 0) {
+             doSuppressWarnings = TRUE;
+         }
++        else if (strcmp(argv[i], H_KEY) == 0) {
++            doHollerith = TRUE;
++        }
+ #if defined(__cos)
+         else {
+             usage();
+@@ -218,7 +223,7 @@
+ 
+ static void usage(void) {
+ #if defined(__cos)
+-    fputs("usage: KFTC [ALLOC=STATIC|STACK|AUTO][I=sfile][L=lfile][O=ofile][S]\n", stderr);
++    fputs("usage: KFTC [ALLOC=STATIC|STACK|AUTO][H][I=sfile][L=lfile][O=ofile][S]\n", stderr);
+     fputs("  ALLOC=key - variable storage allocation strategy\n", stderr);
+     fputs("              STATIC : variables are allocated in static storage\n", stderr);
+     fputs("              STACK or AUTO : variables are allocated on the runtime stack\n", stderr);
+@@ -227,7 +232,7 @@
+     fputs("  O=ofile   - output file (default ZZZZCAL)\n", stderr);
+     fputs("  S         - echo source code lines to output file\n", stderr);
+ #else
+-    fputs("usage: kftc [-a static|stack|auto][-l lfile][-o ofile][-s] sfile\n", stderr);
++    fputs("usage: kftc [-a static|stack|auto][-H][-l lfile][-o ofile][-s] sfile\n", stderr);
+     fputs("  -a key    - variable storage allocation strategy\n", stderr);
+     fputs("              static : variables are allocated in static storage\n", stderr);
+     fputs("              stack or auto : variables are allocated on the runtime stack\n", stderr);
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/proto.h b/fortran/proto.h
+--- a/fortran/proto.h	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/proto.h	2026-10-11 20:42:01.118644686 -0400
+@@ -77,6 +77,7 @@
+ extern char currentDate[];
+ extern char currentTime[];
+ extern bool doEchoSource;
++extern bool doHollerith;
+ extern bool doList;
+ extern bool doStaticLocals;
+ extern bool doStaticLocalsDefault;
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/const.h b/fortran/runtime/const.h
+--- a/fortran/runtime/const.h	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/runtime/const.h	2026-10-11 20:42:01.123071061 -0400
+@@ -28,7 +28,7 @@
+ #define MAX_ALLOCATED_UNITS  20
+ #define MAX_BUF_SIZE        256
+ #define MAX_FILE_NAME_LEN     7
+-#define MAX_FMT_DESC         50
++#define MAX_FMT_DESC        256
+ #define MAX_FMT_LEN        1024
+ #define MAX_FMT_RECL        152
+ #define MAX_UNIT_NUMBER     102
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/fmt.c b/fortran/runtime/fmt.c
+--- a/fortran/runtime/fmt.c	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/runtime/fmt.c	2026-10-11 20:42:01.122614019 -0400
+@@ -145,9 +145,12 @@
+ }
+ 
+ void _inpfmt(void *value) {
++    char c;
+     unsigned long charRef;
+     int fieldWidth;
++    int i;
+     int len;
++    int n;
+     char *s;
+     u64 word;
+ 
+@@ -173,24 +176,19 @@
+             s = (char *)(charRef & 0xffffffff);
+             len = charRef >> 32;
+             if (len == 0) { // value is not type CHARACTER
+-                word = 0;
++                /*
++                 *  The word takes the characters as a CHARACTER*8 variable
++                 *  would: the rightmost 8 of a wider field, a narrower
++                 *  field left-justified and blank-filled, so that 'A1'
++                 *  reads a word that compares equal to the Hollerith 'x'.
++                 */
+                 fieldWidth = (nextDesc->width == 0) ? 8 : nextDesc->width;
+-                while (fieldWidth > 0) {
+-                    word <<= 8;
+-                    if (cursor < limit) {
+-                        word |= (*cursor++) & 0xff;
+-                    }
+-                    else {
+-                        word |= ' ';
+-                    }
+-                    fieldWidth -= 1;
+-                }
+-                s += 7;
+-                len = 8;
+-                while (len-- > 0) {
+-                    *s-- = word & 0xff;
+-                    word >>= 8;
++                n = (fieldWidth > 8) ? fieldWidth - 8 : 0;
++                for (i = 0; i < fieldWidth; i++) {
++                    c = (cursor < limit) ? *cursor++ : ' ';
++                    if (i >= n) *s++ = c;
+                 }
++                for (i = fieldWidth - n; i < 8; i++) *s++ = ' ';
+             }
+             else {
+                 fieldWidth = (nextDesc->width == 0) ? len : nextDesc->width;
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/fmt2.c b/fortran/runtime/fmt2.c
+--- a/fortran/runtime/fmt2.c	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/runtime/fmt2.c	2026-10-11 20:42:01.121992103 -0400
+@@ -29,13 +29,44 @@
+ 
+ void _prsfmt(unsigned long strDesc) {
+     char *bp;
++    char *bpLimit;
++    char c;
++    int count;
+     char *limit;
+     char *s;
+ 
+     s = (char *)(strDesc & 0xffffffff);
+     limit = s + (strDesc >> 32);
+     bp = fmtBuf;
+-    while (s < limit) *bp++ = *s++;
++    bpLimit = fmtBuf + MAX_FMT_LEN;
++    /*
++     *  Blanks mean nothing in a format outside its character and Hollerith
++     *  fields, and a format put together in an array of words has them
++     *  inside its descriptors ("2       a1"), so they are left out here.
++     */
++    count = 0;
++    while (s < limit && bp < bpLimit) {
++        c = *s++;
++        if (c == ' ') continue;
++        *bp++ = c;
++        if (c == '\'') { /* a character field, to its closing apostrophe */
++            while (s < limit && bp < bpLimit) {
++                c = *s++;
++                *bp++ = c;
++                if (c == '\'') break;
++            }
++            count = 0;
++        }
++        else if (c >= '0' && c <= '9') {
++            count = count * 10 + (c - '0');
++        }
++        else {
++            if ((c == 'H' || c == 'h') && count > 0) { /* a Hollerith field */
++                while (count-- > 0 && s < limit && bp < bpLimit) *bp++ = *s++;
++            }
++            count = 0;
++        }
++    }
+     *bp = '\0';
+ 
+     _przfmt(fmtBuf);
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/units.c b/fortran/runtime/units.c
+--- a/fortran/runtime/units.c	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/runtime/units.c	2026-10-11 20:42:01.121483561 -0400
+@@ -39,6 +39,11 @@
+ static Unit units[MAX_ALLOCATED_UNITS];
+ 
+ static void closeUnit(Unit *up, int doDelete);
++static int daLoad(Unit *up);
++static int daRead(Unit *up, char *dst, int n);
++static int daReserve(Unit *up, int recs);
++static int daSave(Unit *up);
++static int daWrite(Unit *up, char *src, int n);
+ static void copyStrToRef(char *s1, ulong ref);
+ static Unit *getUnit(int unitNum, int flags, int recLen);
+ static int openUnit(char *fileName, int unitNum, int flags, int recLen);
+@@ -141,6 +146,7 @@
+         ref = _getrcd();
+         refToCharPtr(ref, &s, &len);
+         if (writer(up, s, len) != len || eor == 0) break;
++        _inircd(); /* what follows a slash begins a new record */
+     }
+ }
+ 
+@@ -174,6 +180,10 @@
+     if (up->ioStat != 0) return;
+     s = (char *)(ref & 0xffffffff);
+     len = ref >> 32;
++    if ((up->flags & MASK_DIRECT) != 0) {
++        up->ioStat = daRead(up, s, len);
++        return;
++    }
+     n = read(up->fd, s, len);
+     if (n == len) {
+         up->ioStat = 0;
+@@ -196,6 +206,10 @@
+ 
+     up = getUnit(unitNum, MASK_UNFORMATTED, MAX_FMT_RECL);
+     if (up->ioStat != 0) return;
++    if ((up->flags & MASK_DIRECT) != 0) {
++        up->ioStat = daRead(up, (char *)value, sizeof(u64));
++        return;
++    }
+     n = read(up->fd, (u8 *)value, sizeof(u64));
+     if (n == sizeof(u64)) {
+         up->ioStat = 0;
+@@ -433,6 +447,17 @@
+     limit = s + len;
+     up = getUnit(unitNum, 0, MAX_FMT_RECL);
+     if (up->ioStat != 0) return;
++    if ((up->flags & MASK_DIRECT) != 0) { /* the next record, blank-filled */
++        n = (len < up->recLen) ? len : up->recLen;
++        up->daPos = 0;
++        up->ioStat = daRead(up, s, n);
++        if (up->ioStat == 0) {
++            for (s += n; s < limit; s++) *s = ' ';
++            up->daRec += 1;
++            up->daPos = 0;
++        }
++        return;
++    }
+     if (up->buf == NULL) {
+         up->buf = (char *)malloc(MAX_BUF_SIZE);
+         if (up->buf == NULL) {
+@@ -482,7 +507,12 @@
+         up->ioStat = EBADF;
+         return;
+     }
+-    if (lseek(up->fd, 0, SEEK_SET) == -1) {
++    if ((up->flags & MASK_DIRECT) != 0) {
++        up->daRec = 1;
++        up->daPos = 0;
++        up->ioStat = 0;
++    }
++    else if (lseek(up->fd, 0, SEEK_SET) == -1) {
+         up->ioStat = errno;
+     }
+     else {
+@@ -490,6 +520,27 @@
+     }
+ }
+ 
++/*
++ *  _setrec - the record a direct access transfer begins at (REC=)
++ */
++void _setrec(int unitNum, int rec) {
++    Unit *up;
++
++    up = _findu(unitNum);
++    if (up == NULL || (up->flags & MASK_OPEN) == 0 || (up->flags & MASK_DIRECT) == 0) {
++        fprintf(stderr, "Unit %d is not open for direct access\n", unitNum);
++        exit(1);
++    }
++    if (rec < 1) {
++        fprintf(stderr, "Unit %d: invalid record number %d\n", unitNum, rec);
++        exit(1);
++    }
++    up->daRec = rec;
++    up->daPos = 0;
++    up->nextRec = rec + 1;
++    up->ioStat = 0;
++}
++
+ void _wrbchr(int unitNum, unsigned long ref) {
+     int len;
+     int n;
+@@ -500,6 +551,10 @@
+     if (up->ioStat != 0) return;
+     s = (char *)(ref & 0xffffffff);
+     len = ref >> 32;
++    if ((up->flags & MASK_DIRECT) != 0) {
++        up->ioStat = daWrite(up, s, len);
++        return;
++    }
+     n = write(up->fd, s, len);
+     if (n == len) {
+         up->ioStat = 0;
+@@ -518,6 +573,10 @@
+ 
+     up = getUnit(unitNum, MASK_UNFORMATTED, MAX_FMT_RECL);
+     if (up->ioStat != 0) return;
++    if ((up->flags & MASK_DIRECT) != 0) {
++        up->ioStat = daWrite(up, (char *)value, sizeof(u64));
++        return;
++    }
+     n = write(up->fd, (u8 *)value, sizeof(u64));
+     if (n == sizeof(u64)) {
+         up->ioStat = 0;
+@@ -559,7 +618,23 @@
+ static void closeUnit(Unit *up, int doDelete) {
+     if (up != NULL && (up->flags & MASK_IMMUTABLE) == 0) {
+         up->ioStat = 0;
+-        if (up->fd > 2 && (up->flags & MASK_OPEN) != 0) {
++        if ((up->flags & MASK_DIRECT) != 0) {
++            if ((up->flags & MASK_OPEN) != 0) {
++                up->flags ^= MASK_OPEN;
++                if (doDelete) {
++                    unlink(up->fileName);
++                }
++                else if (up->daDirty) {
++                    up->ioStat = daSave(up);
++                }
++                if (up->daBuf != NULL) {
++                    free(up->daBuf);
++                    up->daBuf = NULL;
++                }
++                up->daRecs = up->daMax = 0;
++            }
++        }
++        else if (up->fd > 2 && (up->flags & MASK_OPEN) != 0) {
+             up->flags ^= MASK_OPEN;
+             if (close(up->fd) == -1) {
+                 up->ioStat = errno;
+@@ -653,6 +728,32 @@
+     strcpy(up->fileName, fileName);
+     mode = 0;
+ 
++    if ((flags & MASK_DIRECT) != 0) {
++        /*
++         *  A direct access file is kept in memory while it is open: it is
++         *  read whole when it is opened and written whole when it is
++         *  closed, since a COS dataset is read and written in sequence.
++         */
++        if (recLen < 1) {
++            fprintf(stderr, "%s: direct access needs RECL\n", fileName);
++            return EINVAL;
++        }
++        up->recLen = recLen;
++        up->fd = -1;
++        up->daRec = 1;
++        if (_exists(fileName) != 0) {
++            if ((flags & MASK_NEW) == 0) {
++                rc = daLoad(up);
++                if (rc != 0) return rc;
++            }
++        }
++        else if ((flags & MASK_OLD) != 0) {
++            return ENOENT;
++        }
++        up->flags = (flags & ~MASK_NEW) | MASK_OLD | MASK_OPEN;
++        return 0;
++    }
++
+     if ((flags & MASK_NEW) != 0) {
+         access = O_CREAT|O_TRUNC|O_RDWR;
+         mode = 0640;
+@@ -677,6 +778,91 @@
+     return 0;
+ }
+ 
++/*
++ *  Direct access records.  Record n is the recLen bytes from byte
++ *  (n - 1) * recLen of the file; a formatted record is blank-filled and
++ *  has no line end.
++ */
++static int daReserve(Unit *up, int recs) {
++    int n;
++    char *nb;
++
++    if (recs <= up->daRecs) return 0;
++    n = (up->daRecs > 0) ? up->daRecs : 8;
++    while (n < recs) n *= 2;
++    nb = (char *)malloc(n * up->recLen);
++    if (nb == NULL) return ENOMEM;
++    memset(nb, (up->flags & MASK_UNFORMATTED) != 0 ? 0 : ' ', n * up->recLen);
++    if (up->daBuf != NULL) {
++        memcpy(nb, up->daBuf, up->daRecs * up->recLen);
++        free(up->daBuf);
++    }
++    up->daBuf = nb;
++    up->daRecs = n;
++    return 0;
++}
++
++static int daRead(Unit *up, char *dst, int n) {
++    if (up->daRec > up->daMax) return -1; /* no such record */
++    if (up->daPos + n > up->recLen) return EIO; /* longer than a record */
++    memcpy(dst, up->daBuf + (up->daRec - 1) * up->recLen + up->daPos, n);
++    up->daPos += n;
++    return 0;
++}
++
++static int daWrite(Unit *up, char *src, int n) {
++    int rc;
++
++    if (up->daPos + n > up->recLen) return EIO; /* longer than a record */
++    rc = daReserve(up, up->daRec);
++    if (rc != 0) return rc;
++    memcpy(up->daBuf + (up->daRec - 1) * up->recLen + up->daPos, src, n);
++    up->daPos += n;
++    if (up->daRec > up->daMax) up->daMax = up->daRec;
++    up->daDirty = 1;
++    return 0;
++}
++
++static int daLoad(Unit *up) {
++    int fd;
++    int have;
++    int n;
++    int rc;
++
++    fd = open(up->fileName, O_RDONLY|O_BINARY, 0);
++    if (fd == -1) return errno;
++    have = 0;
++    rc = 0;
++    for (;;) {
++        rc = daReserve(up, have / up->recLen + 1);
++        if (rc != 0) break;
++        n = read(fd, up->daBuf + have, up->daRecs * up->recLen - have);
++        if (n < 0) {
++            rc = errno;
++            break;
++        }
++        if (n == 0) break;
++        have += n;
++    }
++    close(fd);
++    up->daMax = have / up->recLen;
++    return rc;
++}
++
++static int daSave(Unit *up) {
++    int fd;
++    int len;
++    int rc;
++
++    fd = open(up->fileName, O_CREAT|O_TRUNC|O_WRONLY|O_BINARY, 0640);
++    if (fd == -1) return errno;
++    rc = 0;
++    len = up->daMax * up->recLen;
++    if (len > 0 && write(fd, up->daBuf, len) != len) rc = errno;
++    if (close(fd) == -1 && rc == 0) rc = errno;
++    return rc;
++}
++
+ static void refToCharPtr(ulong ref, char **s, int *len) {
+     *s = (char *)(ref & 0xffffffff);
+     *len = ref >> 32;
+@@ -697,10 +883,29 @@
+ }
+ 
+ static int writer(Unit *up, void *buf, size_t nbyte) {
++    int len;
+     int n;
+ 
+-    n = write(up->fd, buf, nbyte);
+-    if (n == nbyte) {
++    if ((up->flags & MASK_DIRECT) != 0) { /* a record, blank-filled by daReserve */
++        n = (nbyte < up->recLen) ? nbyte : up->recLen;
++        up->daPos = 0;
++        up->ioStat = daReserve(up, up->daRec);
++        if (up->ioStat != 0) return -1;
++        memset(up->daBuf + (up->daRec - 1) * up->recLen, ' ', up->recLen);
++        up->ioStat = daWrite(up, (char *)buf, n);
++        if (up->ioStat != 0) return -1;
++        up->daRec += 1;
++        up->daPos = 0;
++        return nbyte;
++    }
++    /*
++     *  The blanks that fill the record out to its full length are not
++     *  written: a line of 152 characters takes two on a screen of 80.
++     */
++    len = nbyte;
++    while (len > 1 && ((char *)buf)[len - 1] == ' ') len -= 1;
++    n = write(up->fd, buf, len);
++    if (n == len) {
+         n = write(up->fd, "\n", 1);
+         if (n == 1) {
+             up->ioStat = 0;
+diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/units.h b/fortran/runtime/units.h
+--- a/fortran/runtime/units.h	2025-04-06 22:49:51.000000000 -0400
++++ b/fortran/runtime/units.h	2026-10-11 20:42:01.122923644 -0400
+@@ -76,6 +76,12 @@
+     char *buf;    /* dynamically allocated input buffer */
+     char *out;    /* next available char in buffer      */
+     char *limit;  /* last char in buffer + 1            */
++    char *daBuf;  /* direct access: the records         */
++    int  daRecs;  /* records the buffer has room for    */
++    int  daMax;   /* highest record that exists         */
++    int  daRec;   /* record of the current transfer     */
++    int  daPos;   /* byte position within that record   */
++    int  daDirty; /* 1 if a record has been written     */
+ } Unit;
+ 
+ Unit *_allocu(int unitNum);
+@@ -93,6 +99,7 @@
+              int *reclRef, int *nextRecRef);
+ void _rdufmt(int unitNum, void *value);
+ void _rdurec(int unitNum);
++void _setrec(int unitNum, int rec);
+ void _wrufmt(int unitNum, DataValue *value);
+ 
+ #endif
