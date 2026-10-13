@@ -8,7 +8,10 @@ One Rust workspace, standard library only.
 - `crates/model`: the reference model of the CPU, and `cray-xmp-run`, which runs a memory image on it.
 - `crates/ios`: the reference model of the I/O Subsystem and of a whole system, and `cray-xmp-sys`,
   which runs the I/O Subsystem software and COS on it.
+- `crates/job`: `cray-xmp-job`, which runs a program built for COS on the reference model of
+  the CPU and answers its system requests.
 - `crates/cli`: the `cray-xmp` command.
+- `ack/`: the image with the cross-compilers for COS, which also has `cray-xmp-job`.
 
 Memory images are raw big-endian 64-bit words. Parcel 0 of a word is bits 63 to 48.
 

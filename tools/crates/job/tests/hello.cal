@@ -1,0 +1,44 @@
+* Writes a record to $OUT with buffered I/O, reads the first record of the
+* dataset DATA and writes that too, asks for a thousand words of memory
+* and ends.  The requests are made as a program's library makes them.
+         ORG       200
+START    S0        10             F$OPN: $OUT, with COS's own table
+         S1        OUT
+         EX
+         A1        OUT+1,
+         S2        HELLO,
+         7,A1      S2             the request: function, count, address
+         S0        34             F$BIO
+         S1        A1
+         EX
+         S0        10             F$OPN: DATA, with the program's table
+         S1        IN
+         EX
+         S2        READ,
+         TABLE+7,  S2
+         S0        34
+         S1        TABLE
+         EX
+         A1        OUT+1,
+         S2        ECHO,
+         7,A1      S2
+         S0        34
+         S1        A1
+         EX
+         S0        73             F$MEMORY
+         S1        MORE
+         EX
+         S0        0              F$ADV
+         EX
+OUT      DATA      '$OUT'
+         CON       0
+IN       DATA      'DATA'
+         CON       TABLE
+TABLE    DATA      'DATA'
+         BSSZ      37
+HELLO    CON       50000000000300000000+TEXT      write a record of 3 words
+READ     CON       10000000002000000000+AREA      read a record, 16 words at most
+ECHO     CON       50000000000200000000+AREA      write a record of 2 words
+MORE     CON       1750
+TEXT     DATA      ' HELLO FROM A PROGRAM   '
+AREA     BSSZ      20

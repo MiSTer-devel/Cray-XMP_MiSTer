@@ -1,0 +1,13 @@
+[package]
+name = "cray-xmp-job"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Runs a program built for COS on the CPU reference model and answers its system requests"
+
+[dependencies]
+cray-xmp-model = { path = "../model" }
+
+[dev-dependencies]
+# the test program is a CAL source
+cray-xmp-asm = { path = "../asm" }

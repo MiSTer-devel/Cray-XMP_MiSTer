@@ -33,6 +33,14 @@ name = "cray-xmp-isa"
 version = "0.1.0"
 
 [[package]]
+name = "cray-xmp-job"
+version = "0.1.0"
+dependencies = [
+ "cray-xmp-asm",
+ "cray-xmp-model",
+]
+
+[[package]]
 name = "cray-xmp-model"
 version = "0.1.0"
 dependencies = [
