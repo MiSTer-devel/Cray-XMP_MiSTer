@@ -1,24 +1,758 @@
-diff --color -ruN a/plat/cos/boot.s b/plat/cos/boot.s
---- a/plat/cos/boot.s	2026-10-11 19:11:58.182648475 -0400
-+++ b/plat/cos/boot.s	2026-10-11 19:23:47.145250759 -0400
-@@ -11,6 +11,16 @@
+diff --git a/lang/cem/libcc.ansi/core/string/memcpy.c b/lang/cem/libcc.ansi/core/string/memcpy.c
+index d648815..5034816 100644
+--- a/lang/cem/libcc.ansi/core/string/memcpy.c
++++ b/lang/cem/libcc.ansi/core/string/memcpy.c
+@@ -6,6 +6,20 @@
+ 
+ #include <string.h>
+ 
++#if defined(__cos)
++/*
++ *  On the CRAY the library has a block move that copies whole words while
++ *  both addresses are on a word boundary, and bytes otherwise.
++ */
++extern void _bcopy(void* dst, void* src, int ct);
++
++void* memcpy(void* s1, const void* s2, register size_t n)
++{
++	if (n)
++		_bcopy(s1, (void*)s2, (int)n);
++	return s1;
++}
++#else
+ void* memcpy(void* s1, const void* s2, register size_t n)
+ {
+ 	register char* p1 = s1;
+@@ -21,3 +35,4 @@ void* memcpy(void* s1, const void* s2, register size_t n)
+ 	}
+ 	return s1;
+ }
++#endif
+diff --git a/lang/cem/libcc.ansi/core/string/memset.c b/lang/cem/libcc.ansi/core/string/memset.c
+index 649f8c7..39db9ef 100644
+--- a/lang/cem/libcc.ansi/core/string/memset.c
++++ b/lang/cem/libcc.ansi/core/string/memset.c
+@@ -6,6 +6,46 @@
+ 
+ #include <string.h>
+ 
++#if defined(__cos)
++/*
++ *  On the CRAY whole words are filled: the first is stored, and the
++ *  library's block move, which goes up a word at a time, copies each
++ *  word from the one before it.
++ */
++extern void _bcopy(void* dst, void* src, int ct);
++
++void* memset(void* s, register int c, register size_t n)
++{
++	register char* s1 = s;
++	unsigned long w;
++	size_t words;
++
++	while (n > 0 && ((unsigned long)s1 & 7) != 0)
++	{
++		*s1++ = c;
++		n--;
++	}
++	if (n >= 8)
++	{
++		w = (unsigned char)c;
++		w |= w << 8;
++		w |= w << 16;
++		w |= w << 32;
++		*(unsigned long*)s1 = w;
++		words = n >> 3;
++		if (words > 1)
++			_bcopy(s1 + 8, s1, (int)((words - 1) << 3));
++		s1 += words << 3;
++		n &= 7;
++	}
++	while (n > 0)
++	{
++		*s1++ = c;
++		n--;
++	}
++	return s;
++}
++#else
+ void* memset(void* s, register int c, register size_t n)
+ {
+ 	register char* s1 = s;
+@@ -20,3 +60,4 @@ void* memset(void* s, register int c, register size_t n)
+ 	}
+ 	return s;
+ }
++#endif
+diff --git a/lang/cem/libcc.ansi/sys/malloc/realloc.c b/lang/cem/libcc.ansi/sys/malloc/realloc.c
+index 6e2b4c9..a853082 100644
+--- a/lang/cem/libcc.ansi/sys/malloc/realloc.c
++++ b/lang/cem/libcc.ansi/sys/malloc/realloc.c
+@@ -27,17 +27,21 @@ void* realloc(void* ptr, size_t size)
+ 	/* Overflow check. */
+ 	if (nblocks < size)
+ 		return NULL;
++	/* BLOCKCOUNT counts bytes; a block's size is in blocks, as malloc() has it. */
++	nblocks /= sizeof(block_t);
+ 
+ 	/* Shrinking the block? Don't bother doing anything (it's never worth it). */
+ 	if (nblocks <= h->size)
+ 		return ptr;
+ 
+-	/* Allocate and copy. */
++	/* Allocate and copy what the old block holds: its size less the header.
++	 * (With the header counted in, a new block of as many blocks as the old
++	 * one was written one block past its end.) */
+ 
+ 	newptr = malloc(size);
+ 	if (!newptr)
+ 		return NULL;
+-	memcpy(newptr, ptr, h->size * sizeof(block_t));
++	memcpy(newptr, ptr, (h->size - 1) * sizeof(block_t));
+ 	free(ptr);
+ 	return newptr;
+ }
+diff --git a/mach/crayxmp/libem/dvi.s b/mach/crayxmp/libem/dvi.s
+index 54656db..07a7b06 100644
+--- a/mach/crayxmp/libem/dvi.s
++++ b/mach/crayxmp/libem/dvi.s
+@@ -1,54 +1,41 @@
++*
++* %dvi - divide two integers; the quotient is cut off toward zero
++*
+          entry     %dvi
+-
+-         ext       %cfi
+-         ext       %cif
+-         ext       %dvf
++         ext       %udm
+          ext       @eidivz
+ 
+ text:    section   code
+ 
+-**
+-*  DVI - integer divide
+-*
+-*  Entry
+-*    (SP)   : divisor
+-*    (SP+1) : dividend
+-*
+-*  Exit
+-*    s7 : result
+-*
+ %dvi:    bss       0
+-         s0        ,a7            ; retrieve divisor from stack
+-         jsz       1f             ; if divisor is 0
+-         a7        a7-1           ; save return address on stack
++         s2        0,a7           ; divisor
++         s1        1,a7           ; dividend
++         a7        a7+1           ; empty the stack
++         a7        a7+1
++         s0        s2
++         jsz       4f             ; if divisor is 0
++         a7        a7-1           ; save return address
+          a0        b00
+          ,a7       a0
+-         s0        2,a7           ; retrieve dividend and push it
+-         a7        a7-1
+-         ,a7       s0
+-         r         %cif           ; convert dividend to float
+-         2,a7      s7             ; replace integer dividend with float
+-         s0        1,a7           ; retrieve divisor and push it
+-         a7        a7-1
+-         ,a7       s0
+-         r         %cif           ; convert divisor to float
+-         s0        2,a7           ; retrieve converted dividend and push it
+-         a7        a7-1
+-         ,a7       s0
+-         a7        a7-1           ; push converted divisor
+-         ,a7       s7
+-         r         %dvf           ; perform the division
+-         a7        a7-1           ; push quotient
+-         ,a7       s7
+-         r         %cfi           ; convert result to integer
+-         a0        ,a7            ; restore return address
+-         b00       a0
+-         a1        3              ; empty the stack and return
+-         a7        a7+a1
+-         j         b00
++         s6        s1\s2          ; the sign of the quotient
++         s0        s1
++         jsp       1f
++         s1        -s1
+ 1:
+-         a7        a7+1           ; empty the stack
++         s0        s2
++         jsp       2f
++         s2        -s2
++2:
++         r         %udm
++         s0        s6
++         jsp       3f
++         s7        -s7
++3:
++         a0        ,a7
+          a7        a7+1
++         b00       a0
++         j         b00
++4:
+          j         @eidivz
+ 
+          end
+diff --git a/mach/crayxmp/libem/dvu.s b/mach/crayxmp/libem/dvu.s
+index 75c8573..fa0a407 100644
+--- a/mach/crayxmp/libem/dvu.s
++++ b/mach/crayxmp/libem/dvu.s
+@@ -1,54 +1,155 @@
++*
++* %dvu - divide two unsigned integers
++* %udm - the quotient and the remainder of two unsigned integers
++*
++* The machine divides in floating point, by a reciprocal that is close
++* and not exact: the quotient of two integers that divide evenly can come
++* out a little under the whole number, and cut off it is one too small.
++* So the floating point quotient is only a first guess here.  It is
++* multiplied back, exactly, and put right by what is left over.
++*
+          entry     %dvu
+-
+-         ext       %cfi
+-         ext       %cuf
+-         ext       %dvf
++         entry     %udm
+          ext       @eidivz
+ 
+ text:    section   code
+ 
+-**
+-*  DVU - unsigned integer divide
+-*
+-*  Entry
+-*    (SP)   : divisor
+-*    (SP+1) : dividend
+-*
+-*  Exit
+-*    s7 : result
+-*
+ %dvu:    bss       0
+-         s0        ,a7            ; retrieve divisor from stack
++         s2        0,a7           ; divisor
++         s1        1,a7           ; dividend
++         a7        a7+1           ; empty the stack
++         a7        a7+1
++         s0        s2
+          jsz       1f             ; if divisor is 0
+-         a7        a7-1           ; save return address on stack
++         a7        a7-1           ; save return address
+          a0        b00
+          ,a7       a0
+-         s0        2,a7           ; retrieve dividend and push it
+-         a7        a7-1
+-         ,a7       s0
+-         r         %cuf           ; convert dividend to float
+-         2,a7      s7             ; replace integer dividend with float
+-         s0        1,a7           ; retrieve divisor and push it
+-         a7        a7-1
+-         ,a7       s0
+-         r         %cuf           ; convert divisor to float
+-         s0        2,a7           ; retrieve converted dividend and push it
+-         a7        a7-1
+-         ,a7       s0
+-         a7        a7-1           ; push converted divisor
+-         ,a7       s7
+-         r         %dvf           ; perform the division
+-         a7        a7-1           ; push quotient
+-         ,a7       s7
+-         r         %cfi           ; convert result to unsigned integer
+-         a0        ,a7            ; restore return address
++         r         %udm
++         a0        ,a7
++         a7        a7+1
+          b00       a0
+-         a1        3              ; empty the stack and return
+-         a7        a7+a1
+          j         b00
+ 1:
+-         a7        a7+1           ; empty the stack
+-         a7        a7+1
+          j         @eidivz
+ 
++*
++*  %udm
++*
++*  Entry
++*    S1 : dividend
++*    S2 : divisor, not zero
++*
++*  Exit
++*    S7 : quotient
++*    S1 : remainder
++*
++*  Uses S0, S3, A0, A1.  S2 and S6 are as they were.
++*
++%udm:    bss       0
++         a7        a7-1           ; two more registers are needed
++         ,a7       s4
++         a7        a7-1
++         ,a7       s5
++         s0        s1!s2
++         s0        s0>46
++         jsn       6f             ; if too large for floating point
++         s7        0
++         s0        s1-s2
++         jsm       5f             ; if dividend < divisor
++         s3        o'40060        ; both in floating point
++         s3        s3<48
++         s7        s3!s1
++         s7        +Fs7
++         s3        s3!s2
++         s3        +Fs3
++         s4        /Hs3           ; reciprocal of the divisor
++         s7        s7*Fs4
++         s3        s3*Is4         ; its correction
++         s7        s7*Fs3         ; quotient
++         s3        s7             ; cut off to an integer
++         s3        s3>48
++         s4        o'40060
++         s4        s4-s3
++         a1        s4
++         s3        <48
++         s7        s7&s3
++         s7        s7>a1          ; the guess
++         s0        s7
++         jsz       3f             ; if it is zero
++         a1        zs7            ; guess * divisor: shifts that add up to 48
++         s3        a1
++         s4        16
++         s3        s3-s4
++         a1        s3
++         s5        s7
++         s5        s5<a1
++         s4        48
++         s4        s4-s3
++         a1        s4
++         s4        s2
++         s4        s4<a1
++         s5        s5*Fs4
++         s1        s1-s5          ; what is left over
++3:
++         s4        1
++         s0        s1
++         jsp       4f
++         s1        s1+s2          ; guess too large
++         s7        s7-s4
++         j         3b
++4:
++         s0        s1-s2
++         jsm       5f             ; if less than the divisor: done
++         s1        s1-s2          ; guess too small
++         s7        s7+s4
++         j         4b
++5:
++         s5        ,a7
++         a7        a7+1
++         s4        ,a7
++         a7        a7+1
++         j         b00
++*
++*  Numbers of more than 46 bits: a bit at a time, or, when the divisor
++*  has one of its two top bits, by taking it away as often as it goes.
++*
++6:
++         s7        0
++         s5        1
++         s3        s2
++         s3        s3>62
++         s0        s3
++         jsn       9f             ; if divisor >= 2**62
++         s3        0
++         s4        64
++         a1        1
++7:
++         s3        s3,s1<a1
++         s1        s1<1
++         s7        s7<1
++         s0        s3-s2
++         jsm       8f
++         s3        s3-s2
++         s7        s7!s5
++8:
++         s4        s4-s5
++         s0        s4
++         jsn       7b
++         s1        s3
++         j         5b
++9:
++         s3        s1\s2
++         s0        s3
++         jsm       1f             ; if their top bits differ
++         s0        s1-s2
++         jsm       5b             ; if dividend < divisor
++2:
++         s1        s1-s2
++         s7        s7+s5
++         j         9b
++1:
++         s0        s1
++         jsm       2b             ; if the dividend has the top bit
++         j         5b
++
+          end
+diff --git a/mach/crayxmp/libem/mli.s b/mach/crayxmp/libem/mli.s
+index 7fbc8fb..940623d 100644
+--- a/mach/crayxmp/libem/mli.s
++++ b/mach/crayxmp/libem/mli.s
+@@ -1,42 +1,69 @@
++*
++* %mli - multiply two integers, signed or unsigned: the low 64 bits of
++* the product, exact.
++*
++* The floating multiply is an integer multiply when both exponents are
++* zero: it gives the upper 48 bits of the 96-bit product of the two
++* coefficients.  With each of two numbers below 2**24 shifted up 24
++* places, that is their product.  Larger numbers are taken apart into
++* limbs of 22 bits and the six products that reach the low 64 bits are
++* added up.
++*
+          entry     %mli
+ 
+-         ext       %cfi
+-         ext       %cif
+-
+ text:    section   code
+ 
+-**
+-*  MLI - integer multiply
+-*
+-*  Entry
+-*    (SP)   : multiplier
+-*    (SP+1) : multiplicand
+-*
+-*  Exit
+-*    s7 : result
+-*
+ %mli:    bss       0
+-         a7        a7-1           ; push return address
+-         a0        b00
+-         ,a7       a0
+-         s1        1,a7           ; retrieve multiplier and push it
+-         a7        a7-1
+-         ,a7       s1
+-         r         %cif           ; convert multiplier to float
+-         1,a7      s7             ; replace integer multiplier with float
+-         s1        2,a7           ; retrieve multiplicand and push it
++         s1        0,a7           ; multiplier
++         s2        1,a7           ; multiplicand
++         a7        a7+1           ; empty the stack
++         a7        a7+1
++         s0        s1!s2
++         s0        s0>24
++         jsn       1f             ; if either has more than 24 bits
++         s1        s1<24
++         s2        s2<24
++         s7        s1*Fs2
++         j         b00
++1:
++         a7        a7-1           ; two more registers are needed
++         ,a7       s4
+          a7        a7-1
+-         ,a7       s1
+-         r         %cif           ; convert multiplicand to float
+-         s1        1,a7           ; retrieve previously converted multiplier
+-         s7        s1*Fs7         ; perform the multiplication
+-         a7        a7-1           ; result to top of stack
+-         ,a7       s7
+-         r         %cfi           ; convert result to integer
+-         a0        ,a7            ; restore return address, empty stack, and return
+-         b00       a0
+-         a1        3
+-         a7        a7+a1
++         ,a7       s5
++         s6        <22            ; a limb
++         s3        s1&s6          ; y0
++         s4        s1
++         s4        s4>22
++         s4        s4&s6          ; y1
++         s1        s1>44          ; y2
++         s5        s2&s6          ; x0
++         s7        s2
++         s7        s7>22
++         s7        s7&s6          ; x1
++         s2        s2>44          ; x2
++         s3        s3<24
++         s4        s4<24
++         s1        s1<24
++         s5        s5<24
++         s7        s7<24
++         s2        s2<24
++         s6        s5*Fs1         ; x0*y2
++         s1        s7*Fs4         ; x1*y1
++         s6        s6+s1
++         s1        s2*Fs3         ; x2*y0
++         s6        s6+s1
++         s6        s6<44
++         s1        s7*Fs3         ; x1*y0
++         s2        s5*Fs4         ; x0*y1
++         s1        s1+s2
++         s1        s1<22
++         s6        s6+s1
++         s1        s5*Fs3         ; x0*y0
++         s7        s6+s1
++         s5        ,a7
++         a7        a7+1
++         s4        ,a7
++         a7        a7+1
+          j         b00
+ 
+          end
+diff --git a/mach/crayxmp/libem/mlu.s b/mach/crayxmp/libem/mlu.s
+index c7f38be..ccf71e4 100644
+--- a/mach/crayxmp/libem/mlu.s
++++ b/mach/crayxmp/libem/mlu.s
+@@ -1,38 +1,13 @@
++*
++* %mlu - multiply two unsigned integers.  The low 64 bits of a product
++* are the same signed or unsigned: %mli does both.
++*
+          entry     %mlu
+-         ext       %cfi
+-         ext       %cuf
++         ext       %mli
+ 
+ text:    section   code
+ 
+-**
+-*  MLU - unsigned integer multiply
+-*
+-*  Entry
+-*    (SP)   : multiplicand
+-*    (SP+1) : multiplier
+-*
+-*  Exit
+-*    s7 : result
+-*
+ %mlu:    bss       0
+-         s1        1,a7           ; retrieve multiplier
+-         a1        b00            ; save return address where multiplier was
+-         1,a7      a1
+-         a7        a7-1           ; push multiplier
+-         ,a7       s1
+-         r         %cuf           ; convert multiplier to float
+-         s1        ,a7            ; swap result with multiplicand
+-         ,a7       s7
+-         a7        a7-1
+-         ,a7       s1
+-         r         %cuf           ; convert multiplicand to float
+-         s1        ,a7            ; retrieve previously converted multiplier
+-         s7        s1*Fs7         ; perform the multiplication
+-         ,a7       s7             ; result to top of stack
+-         r         %cfi           ; convert result to integer
+-         a1        ,a7            ; pop return address and return
+-         a7        a7+1
+-         b00       a1
+-         j         b00
++         j         %mli
+ 
+          end
+diff --git a/mach/crayxmp/libem/rmi.s b/mach/crayxmp/libem/rmi.s
+index e8a81e1..bbbe9a0 100644
+--- a/mach/crayxmp/libem/rmi.s
++++ b/mach/crayxmp/libem/rmi.s
+@@ -1,64 +1,42 @@
++*
++* %rmi - the remainder of two integers; it has the sign of the dividend
++*
+          entry     %rmi
+-
+-         ext       %dvi
+-         ext       %mli
++         ext       %udm
+          ext       @eidivz
+ 
+ text:    section   code
+ 
+-**
+-*  RMI - integer remainder
+-*
+-*  Entry
+-*    (SP)   : divisor
+-*    (SP+1) : dividend
+-*
+-*  Exit
+-*    s7 : result
+-*
+ %rmi:    bss       0
+-         s0        0,a7           ; retrieve divisor
++         s2        0,a7           ; divisor
++         s1        1,a7           ; dividend
++         a7        a7+1           ; empty the stack
++         a7        a7+1
++         s0        s2
+          jsz       4f             ; if divisor is 0
+-         a7        a7-1           ; push return address
++         a7        a7-1           ; save return address
+          a0        b00
+          ,a7       a0
+-         s0        2,a7           ; retrieve dividend and push it
+-         a7        a7-1
+-         ,a7       s0
+-         s0        2,a7           ; retrieve divisor and push it
+-         a7        a7-1
+-         ,a7       s0
+-         r         %dvi           ; perform integer divide
+-         s0        1,a7           ; retrieve original divisor and push it
+-         a7        a7-1
+-         ,a7       s0
+-         a7        a7-1           ; push quotient
+-         ,a7       s7
+-         r         %mli           ; perform integer multiply
+-         s1        2,a7           ; retrieve original dividend
+-         s7        s1-s7          ; calculate remainder
+-         s2        1,a7           ; retrieve original divisor
++         s6        s1             ; the sign of the remainder
+          s0        s1
+-         jsm       3f             ; if original divisor is negative
+-         s0        s7
+-         jsm       1f             ; if remainder less than zero
+-         s0        s7-s2
+-         jsm       2f             ; if remainder less than original divisor
++         jsp       1f
++         s1        -s1
+ 1:
+-         s7        0
++         s0        s2
++         jsp       2f
++         s2        -s2
+ 2:
+-         a0        ,a7            ; restore return address
++         r         %udm
++         s7        s1
++         s0        s6
++         jsp       3f
++         s7        -s7
++3:
++         a0        ,a7
++         a7        a7+1
+          b00       a0
+-         a1        3              ; empty the stack and return
+-         a7        a7+a1
+          j         b00
+-3:
+-         s0        s7-s2
+-         jsm       2b             ; if remainder greater than original divisor
+-         j         1b
+ 4:
+-         a7        a7+1           ; empty the stack
+-         a7        a7+1
+          j         @eidivz
+ 
+          end
+diff --git a/mach/crayxmp/libem/rmu.s b/mach/crayxmp/libem/rmu.s
+index 98a539b..a3207a2 100644
+--- a/mach/crayxmp/libem/rmu.s
++++ b/mach/crayxmp/libem/rmu.s
+@@ -1,58 +1,29 @@
++*
++* %rmu - the remainder of two unsigned integers
++*
+          entry     %rmu
+-
+-         ext       %dvu
+-         ext       %mlu
++         ext       %udm
+          ext       @eidivz
+ 
+ text:    section   code
+ 
+-**
+-*  RMU - unsigned integer remainder
+-*
+-*  Entry
+-*    (SP)   : divisor
+-*    (SP+1) : dividend
+-*
+-*  Exit
+-*    s7 : result
+-*
+ %rmu:    bss       0
+-         s0        0,a7           ; retrieve divisor
+-         jsz       3f             ; if divisor is 0
+-         a7        a7-1           ; push return address
++         s2        0,a7           ; divisor
++         s1        1,a7           ; dividend
++         a7        a7+1           ; empty the stack
++         a7        a7+1
++         s0        s2
++         jsz       1f             ; if divisor is 0
++         a7        a7-1           ; save return address
+          a0        b00
+          ,a7       a0
+-         s0        2,a7           ; retrieve dividend and push it
+-         a7        a7-1
+-         ,a7       s0
+-         s0        2,a7           ; retrieve divisor and push it
+-         a7        a7-1
+-         ,a7       s0
+-         r         %dvu           ; perform unsigned integer divide
+-         s0        1,a7           ; retrieve original divisor and push it
+-         a7        a7-1
+-         ,a7       s0
+-         a7        a7-1           ; push quotient
+-         ,a7       s7
+-         r         %mlu           ; perform unsigned integer multiply
+-         s1        2,a7           ; retrieve original dividend
+-         s7        s1-s7          ; calculate remainder
+-         s2        1,a7           ; retrieve original divisor
+-         s0        s7
+-         jsm       1f             ; if remainder less than zero
+-         s0        s7-s2
+-         jsm       2f             ; if remainder less than original divisor
+-1:
+-         s7        0
+-2:
+-         a0        ,a7            ; restore return address
++         r         %udm
++         s7        s1
++         a0        ,a7
++         a7        a7+1
+          b00       a0
+-         a1        3              ; empty the stack and return
+-         a7        a7+a1
+          j         b00
+-3:
+-         a7        a7+1           ; empty the stack
+-         a7        a7+1
++1:
+          j         @eidivz
+ 
+          end
+diff --git a/plat/cos/boot.s b/plat/cos/boot.s
+index c7f4d38..aaadfc5 100644
+--- a/plat/cos/boot.s
++++ b/plat/cos/boot.s
+@@ -11,7 +11,20 @@ JCLFT:    = O'103            ; Base of LFT (bits 40-63)
  * System function numbers
  F$ADV:    = 0                ; advance to next job step
  F$ABT:    = 1                ; abort job
+-
 +F$MEMORY: = O'073            ; request memory
 +
 +* The heap grows up from the program's high limit and the stack down from
 +* the system's tables at the top of the field length.  COS leaves a small
 +* program the field length of its control statement processor, which is
 +* room enough, but a program larger than that gets a few thousand words
-+* and cannot open a file.  When fewer than this many words are free at
-+* the start, the rest is asked for: COS adds it to the end of the user
-+* area, which moves the high limit and the tables up.
-+MIN%FREE: = O'120000
- 
++* and cannot open a file.  When fewer words are free at the start than
++* the program wants for its heap and stack, the rest is asked for: COS
++* adds it to the end of the user area, which moves the high limit and the
++* tables up.  A program wants 40,960 words unless it says otherwise with
++* a word of its own, long _heapwds in C (libsys has the one that says
++* 40,960).
++
++          ext      @%heapwds
            ext      @%ftFini
            ext      @%ftInit
-@@ -21,6 +31,27 @@
+           ext      @%m%a%i%n
+@@ -21,6 +34,27 @@ text:   section code
  %%start:  =        *
            start    %%start
  *
@@ -33,7 +767,7 @@ diff --color -ruN a/plat/cos/boot.s b/plat/cos/boot.s
 +          s3       JCLFT,    ; base of the system-managed LFT's
 +          s3       s3&s2
 +          s3       s3-s1     ; words free between them
-+          s1       MIN%FREE
++          s1       @%heapwds,
 +          s0       s3-s1
 +          jsp      %%init    ; if enough
 +          s1       s1-s3     ; words to add to the user area
@@ -46,7 +780,7 @@ diff --color -ruN a/plat/cos/boot.s b/plat/cos/boot.s
  *  Initialize local base, stack pointer, and heap pointer
  *
            s1       JCLFT,    ; preset stack pointer to base of system-managed LFT's
-@@ -30,9 +61,7 @@
+@@ -30,9 +64,7 @@ text:   section code
            s3       s3-s1
            a7       s3
            a6       a7        ; preset local base to stack pointer
@@ -57,7 +791,7 @@ diff --color -ruN a/plat/cos/boot.s b/plat/cos/boot.s
            a5       s3
  *
  *  Parse command line arguments
-@@ -119,6 +148,8 @@
+@@ -119,6 +151,8 @@ hol0:     =        w.*
  *  Storage for argc, argv, and the envp array.
  
  bss:      section  data
@@ -66,10 +800,11 @@ diff --color -ruN a/plat/cos/boot.s b/plat/cos/boot.s
  argc:     bss      1
  argv:     bssz     MAX%ARGS+1
  envp:     bssz     1
-diff --color -ruN a/plat/cos/include/sys/files.h b/plat/cos/include/sys/files.h
---- a/plat/cos/include/sys/files.h	2026-10-11 12:31:11.234135899 -0400
-+++ b/plat/cos/include/sys/files.h	2026-10-11 12:31:47.904938105 -0400
-@@ -82,11 +82,13 @@
+diff --git a/plat/cos/include/sys/files.h b/plat/cos/include/sys/files.h
+index 37b5360..89459f5 100644
+--- a/plat/cos/include/sys/files.h
++++ b/plat/cos/include/sys/files.h
+@@ -82,11 +82,13 @@ u64     _bp2wp(void *ptr);
  int     _coscls(ODN *odn);
  int     _cosdnt(DDL *ddl);
  int     _cosopn(ODN *odn, int pd);
@@ -83,10 +818,11 @@ diff --color -ruN a/plat/cos/include/sys/files.h b/plat/cos/include/sys/files.h
  int     _coswdp(FtEntry *entry, void *uda, int ct);
  int     _coswed(FtEntry *entry);
  int     _coswef(FtEntry *entry);
-diff --color -ruN a/plat/cos/libsys/build.lua b/plat/cos/libsys/build.lua
---- a/plat/cos/libsys/build.lua	2026-10-11 12:31:11.231998905 -0400
-+++ b/plat/cos/libsys/build.lua	2026-10-11 12:31:47.904708981 -0400
-@@ -58,6 +58,7 @@
+diff --git a/plat/cos/libsys/build.lua b/plat/cos/libsys/build.lua
+index a10dff6..47db837 100644
+--- a/plat/cos/libsys/build.lua
++++ b/plat/cos/libsys/build.lua
+@@ -58,6 +58,7 @@ acklibrary {
  		"./cosdnt.s",
  		"./cosopn.s",
  		"./cosrdp.s",
@@ -94,9 +830,19 @@ diff --color -ruN a/plat/cos/libsys/build.lua b/plat/cos/libsys/build.lua
  		"./cosrew.s",
  		"./cosrls.s",
  		"./costim.s",
-diff --color -ruN a/plat/cos/libsys/cosrdc.s b/plat/cos/libsys/cosrdc.s
---- a/plat/cos/libsys/cosrdc.s	1969-12-31 19:00:00.000000000 -0500
-+++ b/plat/cos/libsys/cosrdc.s	2026-10-11 12:31:11.236860600 -0400
+@@ -71,6 +72,7 @@ acklibrary {
+ 		"./files.c",
+ 		"./frmptr.s",
+ 		"./getdsp.s",
++		"./heapwds.s",
+ 		"./i24tod.s",
+ 		"./i24too.s",
+ 		"./i32tox.s",
+diff --git a/plat/cos/libsys/cosrdc.s b/plat/cos/libsys/cosrdc.s
+new file mode 100644
+index 0000000..d652b5c
+--- /dev/null
++++ b/plat/cos/libsys/cosrdc.s
 @@ -0,0 +1,51 @@
 +#include "cos.h"
 +
@@ -149,9 +895,30 @@ diff --color -ruN a/plat/cos/libsys/cosrdc.s b/plat/cos/libsys/cosrdc.s
 +         RETURN
 +
 +         end
-diff --color -ruN a/plat/cos/libsys/isatty.c b/plat/cos/libsys/isatty.c
---- a/plat/cos/libsys/isatty.c	2026-10-11 12:31:11.231817864 -0400
-+++ b/plat/cos/libsys/isatty.c	2026-10-11 12:31:11.236663059 -0400
+diff --git a/plat/cos/libsys/heapwds.s b/plat/cos/libsys/heapwds.s
+new file mode 100644
+index 0000000..eb9e7e5
+--- /dev/null
++++ b/plat/cos/libsys/heapwds.s
+@@ -0,0 +1,14 @@
++*
++*  @%heapwds - the words a program wants free for its heap and stack
++*
++*  The startup code asks COS for memory when fewer are free.  A program
++*  that needs more defines the word itself (long _heapwds in C), and this
++*  one is then not loaded.
++*
++         entry     @%heapwds
++
++data:    section   data
++@%heapwds: =       o.*
++         con       o'120000
++
++         end
+diff --git a/plat/cos/libsys/isatty.c b/plat/cos/libsys/isatty.c
+index 2ad51b6..6191717 100644
+--- a/plat/cos/libsys/isatty.c
++++ b/plat/cos/libsys/isatty.c
 @@ -1,8 +1,20 @@
  #include <errno.h>
  #include <stdlib.h>
@@ -174,9 +941,10 @@ diff --color -ruN a/plat/cos/libsys/isatty.c b/plat/cos/libsys/isatty.c
 +    dsp = _getdsp(entry);
 +    return (int)((dsp->first >> 28) & 1);
  }
-diff --color -ruN a/plat/cos/libsys/read.c b/plat/cos/libsys/read.c
---- a/plat/cos/libsys/read.c	2026-10-11 12:31:11.231451531 -0400
-+++ b/plat/cos/libsys/read.c	2026-10-11 12:31:47.905178146 -0400
+diff --git a/plat/cos/libsys/read.c b/plat/cos/libsys/read.c
+index c353e1c..c56c9ab 100644
+--- a/plat/cos/libsys/read.c
++++ b/plat/cos/libsys/read.c
 @@ -4,6 +4,80 @@
  #include <unistd.h>
  #include <sys/files.h>
@@ -258,7 +1026,7 @@ diff --color -ruN a/plat/cos/libsys/read.c b/plat/cos/libsys/read.c
  static int readNextSegment(FtEntry *entry) {
      u8 cwf;
      DSP *dsp;
-@@ -11,9 +85,11 @@
+@@ -11,9 +85,11 @@ static int readNextSegment(FtEntry *entry) {
  
      entry->out = entry->in = 0;
  
@@ -271,7 +1039,7 @@ diff --color -ruN a/plat/cos/libsys/read.c b/plat/cos/libsys/read.c
      cwf = dsp->cwf >> 60;
      if ((cwf & 1) != 0)
          entry->status = COS_EOD;
-@@ -39,6 +115,7 @@
+@@ -39,6 +115,7 @@ ssize_t read(int fd, void *buffer, size_t count) {
      u8 b;
      u8 *bp;
      FtEntry *entry;
@@ -279,7 +1047,7 @@ diff --color -ruN a/plat/cos/libsys/read.c b/plat/cos/libsys/read.c
      u8 *limit;
      int n;
  
-@@ -53,6 +130,7 @@
+@@ -53,6 +130,7 @@ ssize_t read(int fd, void *buffer, size_t count) {
  
      if ((entry->access & O_BINARY) == 0) { // text mode
  
@@ -287,7 +1055,7 @@ diff --color -ruN a/plat/cos/libsys/read.c b/plat/cos/libsys/read.c
          while (bp < limit) {
              if (entry->blankCount > 0) {
                  *bp++ = ' ';
-@@ -63,6 +141,7 @@
+@@ -63,6 +141,7 @@ ssize_t read(int fd, void *buffer, size_t count) {
                      *bp++ = '\n';
                      entry->status = 0;
                      entry->blankCount = 0;
@@ -295,9 +1063,25 @@ diff --color -ruN a/plat/cos/libsys/read.c b/plat/cos/libsys/read.c
                  }
  
                  if (entry->status != 0) break;
-diff --color -ruN a/plat/cos/libsys/write.c b/plat/cos/libsys/write.c
---- a/plat/cos/libsys/write.c	2026-10-11 12:31:11.231643864 -0400
-+++ b/plat/cos/libsys/write.c	2026-10-11 12:31:47.905405145 -0400
+@@ -114,8 +193,12 @@ ssize_t read(int fd, void *buffer, size_t count) {
+ 
+                 if (readNextSegment(entry) == -1) return -1;
+             }
+-            else {
+-                *bp++ = entry->uda[entry->out++];
++            else { /* what the data area holds, or as much of it as is asked for */
++                n = entry->in - entry->out;
++                if (n > limit - bp) n = limit - bp;
++                _bcopy(bp, &entry->uda[entry->out], n);
++                bp += n;
++                entry->out += n;
+             }
+         }
+     }
+diff --git a/plat/cos/libsys/write.c b/plat/cos/libsys/write.c
+index effbae0..0d0fd42 100644
+--- a/plat/cos/libsys/write.c
++++ b/plat/cos/libsys/write.c
 @@ -7,7 +7,49 @@
  
  #define MAX_LOG_MSG_SIZE 128
@@ -348,7 +1132,7 @@ diff --color -ruN a/plat/cos/libsys/write.c b/plat/cos/libsys/write.c
      int i;
      int n;
      int unusedBytes;
-@@ -22,7 +64,15 @@
+@@ -22,7 +64,15 @@ int _ftFlsh(FtEntry *entry) {
          wc = (entry->in + 7) >> 3;
          unusedBytes = (8 - (entry->in & 7)) & 7;
          for (i = 0; i < unusedBytes; i++) entry->uda[entry->in + i] = 0;
@@ -365,7 +1149,7 @@ diff --color -ruN a/plat/cos/libsys/write.c b/plat/cos/libsys/write.c
              entry->in = 0;
              errno = EIO;
              return -1;
-@@ -41,6 +91,27 @@
+@@ -41,6 +91,27 @@ int _coswer(FtEntry *entry) {
      return _ftFlsh(entry) >= 0 ? 0 : -1;
  }
  
@@ -393,7 +1177,7 @@ diff --color -ruN a/plat/cos/libsys/write.c b/plat/cos/libsys/write.c
  ssize_t write(int fd, void *buffer, size_t count) {
      u8 *bp;
      u8 byte;
-@@ -68,12 +139,7 @@
+@@ -68,12 +139,7 @@ ssize_t write(int fd, void *buffer, size_t count) {
              entry->position += n;
              if (entry->position > entry->maxPosition) entry->maxPosition = entry->position;
              if (entry->in >= COS_UDA_SIZE_BYTES) {
@@ -407,7 +1191,7 @@ diff --color -ruN a/plat/cos/libsys/write.c b/plat/cos/libsys/write.c
              }
          }
      }
-@@ -92,12 +158,7 @@
+@@ -92,12 +158,7 @@ ssize_t write(int fd, void *buffer, size_t count) {
                  entry->position += 1;
                  if (entry->position > entry->maxPosition) entry->maxPosition = entry->position;
                  if (entry->in >= COS_UDA_SIZE_BYTES && !IS_STDERR(entry)) {

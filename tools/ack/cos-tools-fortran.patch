@@ -1,7 +1,8 @@
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/codegen.c b/fortran/codegen.c
---- a/fortran/codegen.c	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/codegen.c	2026-10-11 20:42:01.117985353 -0400
-@@ -408,6 +408,17 @@
+diff --git a/fortran/codegen.c b/fortran/codegen.c
+index 906187e..fc15212 100644
+--- a/fortran/codegen.c
++++ b/fortran/codegen.c
+@@ -408,6 +408,17 @@ void emitCatChar(OperatorArgument *leftArg, OperatorArgument *rightArg) {
      emitRestoreRegs(mask);
  }
  
@@ -19,7 +20,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/codegen.c b
  void emitConvertToByteAddress(Register reg) {
      emit("         S%o        S%o<3\n", reg, reg);
  }
-@@ -958,6 +969,32 @@
+@@ -958,6 +969,32 @@ void emitLoadConst(OperatorArgument *arg) {
      arg->details.calculation = dt;
  }
  
@@ -52,7 +53,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/codegen.c b
  void emitLoadConstInt(Register reg, i64 value) {
      if (value >= 0 && value <= 07777777) {
          emit("         S%o        %ld\n", reg, value);
-@@ -1024,8 +1061,10 @@
+@@ -1024,8 +1061,10 @@ void emitLoadReference(OperatorArgument *subject, OperatorArgument *object) {
      char buf[32];
      DataType *dt;
      Symbol *intrinsic;
@@ -63,7 +64,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/codegen.c b
      char regName[3];
      Symbol *sym;
  
-@@ -1149,6 +1188,20 @@
+@@ -1149,6 +1188,20 @@ void emitLoadReference(OperatorArgument *subject, OperatorArgument *object) {
          case SymClass_Function:
          case SymClass_StmtFunction:
              freeRegister(subject->reg);
@@ -84,7 +85,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/codegen.c b
              mask = getRegisterMap();
              emitSaveRegs(mask);
              if (dt->constraint == -1) {
-@@ -1168,7 +1221,13 @@
+@@ -1168,7 +1221,13 @@ void emitLoadReference(OperatorArgument *subject, OperatorArgument *object) {
              emitRestoreRegs(mask);
              emitStoreReg(sym, RESULT_REG);
              subject->reg = allocateRegister();
@@ -99,7 +100,93 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/codegen.c b
              switch (subject->details.reference.offsetClass) {
              case ArgClass_Undefined:
                  /* do nothing */
-@@ -1935,6 +1994,10 @@
+@@ -1774,16 +1833,80 @@ void emitLtReal(OperatorArgument *leftArg, OperatorArgument *rightArg) {
+     emit("         S%o        0\n", rightArg->reg);
+ }
+ 
++/*
++ *  The product of two integers.  When both have zero exponents the
++ *  floating multiply is an integer multiply that gives the upper half of
++ *  the 96-bit product of the two 48-bit coefficients: with each magnitude
++ *  shifted up 24 places that half is the product itself.  That serves
++ *  magnitudes below 2**24; anything larger goes to the library.
++ */
+ void emitMulInt(OperatorArgument *leftArg, OperatorArgument *rightArg) {
++    char done[16];
++    Register l;
+     u16 mask;
+-
+-    mask = getRegisterMap() & ~((1 << rightArg->reg) | (1 << leftArg->reg));
++    Register r;
++    char slow[16];
++
++    l = leftArg->reg;
++    r = rightArg->reg;
++    generateLabel(slow);
++    generateLabel(done);
++    emit("         S7        S%o\\S%o\n", l, r);
++    emit("         S0        S%o\n", l);
++    emit("         JSP       *+3\n");
++    emit("         S%o        -S%o\n", l, l);
++    emit("         S0        S%o\n", r);
++    emit("         JSP       *+3\n");
++    emit("         S%o        -S%o\n", r, r);
++    emit("         S0        S%o!S%o\n", l, r);
++    emit("         S0        S0>24\n");
++    emit("         JSN       %s\n", slow);
++    emit("         S%o        S%o<24\n", l, l);
++    emit("         S%o        S%o<24\n", r, r);
++    emit("         S%o        S%o*FS%o\n", r, l, r);
++    emit("         J         %s\n", done);
++    emitLabel(slow);
++    emitPushReg(RESULT_REG);
++    mask = getRegisterMap() & ~((1 << r) | (1 << l));
+     emitSaveRegs(mask);
+-    emitPushReg(leftArg->reg);
+-    emitPushReg(rightArg->reg);
++    emitPushReg(l);
++    emitPushReg(r);
+     emit("         R         %%mli\n");
+-    if (rightArg->reg != RESULT_REG) emit("         S%o        S7\n", rightArg->reg);
++    emit("         S%o        S7\n", r);
+     emitRestoreRegs(mask);
++    emitPopReg(RESULT_REG);
++    emitLabel(done);
++    emit("         S0        S7\n");
++    emit("         JSP       *+3\n");
++    emit("         S%o        -S%o\n", r, r);
++}
++
++/*
++ *  The bit functions, done in line: the first argument shifted by a
++ *  constant, or by a count in a register (left when it is positive).
++ */
++void emitShiftConst(Register reg, int count) {
++    if (count >= 64 || count <= -64)
++        emit("         S%o        0\n", reg);
++    else if (count > 0)
++        emit("         S%o        S%o<%d\n", reg, reg, count);
++    else if (count < 0)
++        emit("         S%o        S%o>%d\n", reg, reg, -count);
++}
++
++void emitShiftReg(Register reg, Register count) {
++    emit("         A1        S%o\n", count);
++    emit("         S0        S%o\n", count);
++    emit("         JSM       *+5\n");
++    emit("         S%o        S%o<A1\n", reg, reg);
++    emit("         J         *+5\n");
++    emit("         S%o        -S%o\n", count, count);
++    emit("         A1        S%o\n", count);
++    emit("         S%o        S%o>A1\n", reg, reg);
++}
++
++void emitXorInt(OperatorArgument *leftArg, OperatorArgument *rightArg) {
++    emit("         S%o        S%o\\S%o\n", rightArg->reg, leftArg->reg, rightArg->reg);
+ }
+ 
+ void emitMulOffset(Register reg, int factor) {
+@@ -1935,6 +2058,10 @@ void emitProlog(Symbol *sym, bool isEntry) {
      emit("         A6        A7\n");    /* set new base pointer */
      emit("         A1        %s,\n", isEntry ? progUnitSym->details.progUnit.frameSizeLabel : sym->details.progUnit.frameSizeLabel);
      emit("         A7        A7-A1\n"); /* reserve space for local variables */
@@ -110,7 +197,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/codegen.c b
      if (isEntry) {
          emit("%-8s BSS       0\n", skipLabel);
      }
-@@ -2113,10 +2176,10 @@
+@@ -2113,10 +2240,10 @@ void emitStaticInitializer(StorageAttributes *attrs, ConstantListItem *constantL
              }
              break;
          case BaseType_Logical:
@@ -123,10 +210,11 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/codegen.c b
              break;
          case BaseType_Double:
          case BaseType_Real:
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/codegen.h b/fortran/codegen.h
---- a/fortran/codegen.h	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/codegen.h	2026-10-11 20:42:01.141639476 -0400
-@@ -57,6 +57,7 @@
+diff --git a/fortran/codegen.h b/fortran/codegen.h
+index be5edba..1caf430 100644
+--- a/fortran/codegen.h
++++ b/fortran/codegen.h
+@@ -57,6 +57,7 @@ void emitCalcTrip1(DoStackEntry *entry, BaseType type);
  void emitCalcTripNeg1(DoStackEntry *entry, BaseType type);
  void emitCatChar(OperatorArgument *leftArg, OperatorArgument *rightArg);
  void emitConvertToByteAddress(Register reg);
@@ -134,7 +222,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/codegen.h b
  void emitCopyAddrReg(Register r1, Register r2);
  void emitCopyFromOffset(Register r1, Register r2);
  void emitCopyRegister(Register r1, Register r2);
-@@ -101,6 +102,7 @@
+@@ -101,6 +102,7 @@ Register emitLoadAdjBoundsRef(Symbol *symbol);
  void emitLoadByReference(OperatorArgument *ref);
  void emitLoadByteReference(OperatorArgument *subject, OperatorArgument *object);
  void emitLoadConst(OperatorArgument *arg);
@@ -142,10 +230,21 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/codegen.h b
  void emitLoadConstInt(Register reg, i64 value);
  void emitLoadConstOffset(OperatorArgument *arg);
  Register emitLoadFrame(int offset);
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/coercion.c b/fortran/coercion.c
---- a/fortran/coercion.c	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/coercion.c	2026-10-11 20:42:01.143003934 -0400
-@@ -72,6 +72,7 @@
+@@ -115,6 +117,9 @@ void emitLtInt(OperatorArgument *leftArg, OperatorArgument *rightArg);
+ void emitLtLog(OperatorArgument *leftArg, OperatorArgument *rightArg);
+ void emitLtReal(OperatorArgument *leftArg, OperatorArgument *rightArg);
+ void emitMulInt(OperatorArgument *leftArg, OperatorArgument *rightArg);
++void emitShiftConst(Register reg, int count);
++void emitShiftReg(Register reg, Register count);
++void emitXorInt(OperatorArgument *leftArg, OperatorArgument *rightArg);
+ void emitMulOffset(Register reg, int factor);
+ void emitMulReal(OperatorArgument *leftArg, OperatorArgument *rightArg);
+ void emitMulSize(Register reg, Symbol *sym);
+diff --git a/fortran/coercion.c b/fortran/coercion.c
+index b798da4..cf30a92 100644
+--- a/fortran/coercion.c
++++ b/fortran/coercion.c
+@@ -72,6 +72,7 @@ static BaseType logicalCoercion[BaseType_Pointer+1][BaseType_Pointer+1] = {
  /* Pointer   */ {BaseType_Undefined, BaseType_Undefined, BaseType_Pointer,   BaseType_Pointer,   BaseType_Undefined, BaseType_Undefined, BaseType_Undefined, BaseType_Undefined, BaseType_Undefined}
  };
  
@@ -153,7 +252,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/coercion.c 
  static BaseType coerceDoubleToComplex(OperatorArgument *arg, BaseType fromType, BaseType toType);
  static BaseType coerceDoubleToInt(OperatorArgument *arg, BaseType fromType, BaseType toType);
  static BaseType coerceDoubleToReal(OperatorArgument *arg, BaseType fromType, BaseType toType);
-@@ -89,7 +90,7 @@
+@@ -89,7 +90,7 @@ static BaseType coerceToUndefined(OperatorArgument *arg, BaseType fromType, Base
  static BaseType (*coercionFns[BaseType_Pointer+1][BaseType_Pointer+1])(OperatorArgument *arg, BaseType fromType, BaseType toType) = {
  /*               Undefined          Character          Logical            Integer             Real                Double              Complex                Label              Pointer            */
  /* Undefined */ {coerceToUndefined, coerceToUndefined, coerceToUndefined, coerceToUndefined,  coerceToUndefined,  coerceToUndefined,  coerceToUndefined,     coerceToUndefined, coerceToUndefined},
@@ -162,7 +261,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/coercion.c 
  /* Logical   */ {coerceToUndefined, coerceToUndefined, coerceNot,         coerceLogicalToInt, coerceToUndefined,  coerceToUndefined,  coerceToUndefined,     coerceToUndefined, coerceToUndefined},
  /* Integer   */ {coerceToUndefined, coerceToUndefined, coerceToUndefined, coerceNot,          coerceIntToReal,    coerceIntToDouble,  coerceIntToComplex,    coerceToUndefined, coerceNot        },
  /* Real      */ {coerceToUndefined, coerceToUndefined, coerceToUndefined, coerceRealToInt,    coerceNot,          coerceRealToDouble, coerceRealToComplex,   coerceToUndefined, coerceToUndefined},
-@@ -100,6 +101,10 @@
+@@ -100,6 +101,10 @@ static BaseType (*coercionFns[BaseType_Pointer+1][BaseType_Pointer+1])(OperatorA
  };
  
  BaseType calculateCoercedType(OperatorId op, BaseType leftType, BaseType rightType) {
@@ -173,7 +272,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/coercion.c 
      switch (op) {
      case OP_EXP:
      case OP_ADD:
-@@ -135,6 +140,40 @@
+@@ -135,6 +140,40 @@ BaseType coerceArgument(OperatorArgument *arg, BaseType fromType, BaseType toTyp
      return toType;
  }
  
@@ -214,9 +313,10 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/coercion.c 
  static BaseType coerceDoubleToComplex(OperatorArgument *arg, BaseType fromType, BaseType toType) {
      return toType;
  }
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/coercion.h b/fortran/coercion.h
---- a/fortran/coercion.h	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/coercion.h	2026-10-11 20:42:01.119950269 -0400
+diff --git a/fortran/coercion.h b/fortran/coercion.h
+index 5f1a77d..ed07796 100644
+--- a/fortran/coercion.h
++++ b/fortran/coercion.h
 @@ -28,6 +28,7 @@
  #include "types.h"
  
@@ -225,10 +325,19 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/coercion.h 
  BaseType coerceArgument(OperatorArgument *arg, BaseType fromType, BaseType toType);
  
  #endif
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b/fortran/compile.c
---- a/fortran/compile.c	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/compile.c	2026-10-11 20:42:01.117588936 -0400
-@@ -228,6 +228,7 @@
+diff --git a/fortran/compile.c b/fortran/compile.c
+index c7dec54..e86f42b 100644
+--- a/fortran/compile.c
++++ b/fortran/compile.c
+@@ -59,6 +59,7 @@ static Symbol *defineNameListDoVar(char *varId);
+ static char *eatWsp(char *s);
+ static void errArgType(OperatorId op, BaseType type, OperatorArgument *arg);
+ static bool evaluateArrayRef(Symbol *symbol, TokenListItem *subscriptList, OperatorArgument *offset);
++static bool evaluateBitFunction(Token *fn, int id);
+ static bool evaluateExpression(Token *expression, OperatorArgument *result);
+ static bool evaluateExprHelper(Token *expression);
+ static bool evaluateFmtSpec(ControlInfoList *ciList);
+@@ -228,6 +229,7 @@ static Symbol *currentLabel;
  static char lineBuf[MAX_LINE_LENGTH+1];
  static ParsingState state;
  
@@ -236,7 +345,111 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
  static OperatorArgument argStack[MAX_ARG_STACK_SIZE];
  static int argStkPtr = 0;
  static DoStackEntry doStack[MAX_DO_STACK_SIZE];
-@@ -1145,6 +1146,21 @@
+@@ -1032,6 +1034,103 @@ static bool evaluateArrayRef(Symbol *symbol, TokenListItem *subscriptList, Opera
+     return FALSE;
+ }
+ 
++/*
++ *  The bit functions of Cray FORTRAN and of MIL-STD-1753, which take and
++ *  give words: AND, OR, XOR and NOT with their other names, and ISHFT.
++ *  They are compiled in line unless the program has a routine or a
++ *  variable of the name.
++ */
++#define BitFn_And   1
++#define BitFn_Or    2
++#define BitFn_Xor   3
++#define BitFn_Not   4
++#define BitFn_Shift 5
++
++static int bitFunctionId(char *name) {
++    if (strcasecmp(name, "AND") == 0 || strcasecmp(name, "IAND") == 0) return BitFn_And;
++    if (strcasecmp(name, "OR")  == 0 || strcasecmp(name, "IOR")  == 0) return BitFn_Or;
++    if (strcasecmp(name, "XOR") == 0 || strcasecmp(name, "IEOR") == 0) return BitFn_Xor;
++    if (strcasecmp(name, "NOT") == 0 || strcasecmp(name, "COMPL") == 0) return BitFn_Not;
++    if (strcasecmp(name, "ISHFT") == 0) return BitFn_Shift;
++    return 0;
++}
++
++static bool evaluateBitFunction(Token *fn, int id) {
++    OperatorArgument args[2];
++    int count;
++    BaseType type;
++    int i;
++    int n;
++    TokenListItem *qualifier;
++    OperatorArgument result;
++
++    n = 0;
++    for (qualifier = fn->details.identifier.qualifiers; qualifier != NULL; qualifier = qualifier->next) {
++        if (qualifier->item == NULL) continue;
++        if (n >= 2 || evaluateExpression(qualifier->item, &args[n])) {
++            if (n >= 2) err("Too many arguments to %s", fn->details.identifier.name);
++            for (i = 0; i < n && i < 2; i++) {
++                if (isCalculation(args[i])) freeRegister(args[i].reg);
++            }
++            return TRUE;
++        }
++        type = getDataType(&args[n])->type;
++        if (type == BaseType_Character || type == BaseType_Complex) {
++            err("Invalid argument to %s", fn->details.identifier.name);
++            return TRUE;
++        }
++        /* the first is loaded before the second is looked at, so that it
++           holds no address register meanwhile */
++        if (n == 0) loadValue(&args[0]);
++        n += 1;
++    }
++    if (n != ((id == BitFn_Not) ? 1 : 2)) {
++        err("Wrong number of arguments to %s", fn->details.identifier.name);
++        return TRUE;
++    }
++    if (id == BitFn_Shift && isConstant(args[1]) && args[1].details.constant.dt.type == BaseType_Integer) {
++        count = (args[1].details.constant.value.integer > 64) ? 64
++              : (args[1].details.constant.value.integer < -64) ? -64
++              : (int)args[1].details.constant.value.integer;
++        emitShiftConst(args[0].reg, count);
++        result = args[0];
++    }
++    else {
++        if (n > 1) loadValue(&args[1]);
++        switch (id) {
++        case BitFn_And:
++            emitAndInt(&args[0], &args[1]);
++            break;
++        case BitFn_Or:
++            emitOrInt(&args[0], &args[1]);
++            break;
++        case BitFn_Xor:
++            emitXorInt(&args[0], &args[1]);
++            break;
++        case BitFn_Not:
++            emitNotReg(args[0].reg, BaseType_Integer);
++            break;
++        default:
++            emitShiftReg(args[0].reg, args[1].reg);
++            break;
++        }
++        if (id == BitFn_Not || id == BitFn_Shift) {
++            result = args[0];
++            if (n > 1) freeRegister(args[1].reg);
++        }
++        else {
++            result = args[1];
++            freeRegister(args[0].reg);
++        }
++    }
++    result.class = ArgClass_Calculation;
++    result.details.calculation.type = BaseType_Integer;
++    result.details.calculation.rank = 0;
++    pushArg(&result);
++
++    return FALSE;
++}
++
+ static bool evaluateExpression(Token *expression, OperatorArgument *result) {
+     int curOpStkBtm;
+     int argStkBtm;
+@@ -1145,6 +1244,21 @@ static bool evaluateFmtSpec(ControlInfoList *ciList) {
          freeRegister(result.reg);
          formatter = "@_prsfmt";
      }
@@ -258,7 +471,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
      else {
          err("Format specification is not character type or FORMAT label");
          if (isCalculation(result)) freeRegister(result.reg);
-@@ -1159,6 +1175,7 @@
+@@ -1159,6 +1273,7 @@ static bool evaluateFmtSpec(ControlInfoList *ciList) {
  static bool evaluateFunction(Token *fn, Symbol *symbol, Symbol *intrinsic) {
      DataType *dt;
      int frameSize;
@@ -266,7 +479,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
      int n;
      int parmIdx;
      int pass;
-@@ -1173,6 +1190,7 @@
+@@ -1173,6 +1288,7 @@ static bool evaluateFunction(Token *fn, Symbol *symbol, Symbol *intrinsic) {
      emitSaveRegs(registerMap);
      enableEmission(FALSE);
      varArgIncr = 0;
@@ -274,7 +487,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
      if (intrinsic != NULL) {
          intrinsic = matchIntrinsic(fn, intrinsic);
          if (intrinsic == NULL) {
-@@ -1216,7 +1234,10 @@
+@@ -1216,7 +1332,10 @@ static bool evaluateFunction(Token *fn, Symbol *symbol, Symbol *intrinsic) {
                          frameSize += 1;
                      }
                      else {
@@ -286,7 +499,18 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
                          freeCharValue(&result.details.constant.value);
                          emitStoreStack(result.reg, parmIdx);
                          freeRegister(result.reg);
-@@ -1901,6 +1922,10 @@
+@@ -1318,6 +1437,10 @@ static bool evaluateIdentifier(Token *id) {
+ 
+     name = id->details.identifier.name;
+     symbol = findSymbol(name);
++    if (id->details.identifier.qualifiers != NULL && bitFunctionId(name) != 0
++        && (symbol == NULL || (symbol->class == SymClass_Undefined && getSymbolType(symbol)->rank == 0))) {
++        return evaluateBitFunction(id, bitFunctionId(name));
++    }
+     if (symbol == NULL) {
+         symbol = addSymbol(name, SymClass_Undefined);
+     }
+@@ -1901,6 +2024,10 @@ static bool executeOperator(OperatorId op) {
          if (isLoadable(leftArg)) loadValue(&leftArg);
          if (leftType  != argType) leftType  = coerceArgument(&leftArg,  leftType,  argType);
          if (rightType != argType) rightType = coerceArgument(&rightArg, rightType, argType);
@@ -297,7 +521,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
          if (!isConstResult) {
              if (isConstant(leftArg)) {
                  emitLoadConst(&leftArg);
-@@ -2405,6 +2430,22 @@
+@@ -2405,6 +2532,22 @@ static void inputFini(ControlInfoList *ciList) {
      emitAdjustSP(2);
  }
  
@@ -320,7 +544,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
  static void inputInit(ControlInfoList *ciList) {
      DataType *dt;
      OperatorArgument unit;
-@@ -2416,6 +2457,7 @@
+@@ -2416,6 +2559,7 @@ static void inputInit(ControlInfoList *ciList) {
      freeRegister(unit.reg);
      dt = getDataType(&unit);
      ciList->unitType = dt->type;
@@ -328,7 +552,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
      if (ciList->unitType == BaseType_Character) {
          emitPrimCall("@_setrcd");
      }
-@@ -2741,6 +2783,7 @@
+@@ -2741,6 +2885,7 @@ static void outputInit(ControlInfoList *ciList) {
      freeRegister(unit.reg);
      dt = getDataType(&unit);
      ciList->unitType = dt->type;
@@ -336,7 +560,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
      if (ciList->unitType == BaseType_Character) {
          emitPrimCall("@_setrcd");
          emitPrimCall("@_inircd");
-@@ -2753,6 +2796,7 @@
+@@ -2753,6 +2898,7 @@ static void outputInit(ControlInfoList *ciList) {
  static char *parseActualArguments(char *s, int *frameSize) {
      DataType *dt;
      Token *expression;
@@ -344,7 +568,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
      int parmIdx;
      int pass;
      Register reg;
-@@ -2762,6 +2806,7 @@
+@@ -2762,6 +2908,7 @@ static char *parseActualArguments(char *s, int *frameSize) {
  
      *frameSize = 0;
      tempIdx = 0;
@@ -352,7 +576,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
      start = eatWsp(s + 1);
      if (*start == ')') return start + 1;
      enableEmission(FALSE);
-@@ -2787,7 +2832,10 @@
+@@ -2787,7 +2934,10 @@ static char *parseActualArguments(char *s, int *frameSize) {
                              *frameSize += 1;
                          }
                          else {
@@ -364,7 +588,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
                              freeCharValue(&result.details.constant.value);
                              emitStoreStack(result.reg, parmIdx);
                              freeRegister(result.reg);
-@@ -5162,7 +5210,8 @@
+@@ -5162,7 +5312,8 @@ static void parseASSIGN(char *s) {
      }
      labelSym = findLabel(lineLabel);
      if (labelSym != NULL) {
@@ -374,7 +598,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
              err("Label does not reference executable or FORMAT statement");
              return;
          }
-@@ -5261,6 +5310,16 @@
+@@ -5261,6 +5412,16 @@ static void parseCALL(char *s) {
      }
      strcpy(name, token.details.identifier.name);
      sym = findSymbol(name);
@@ -391,7 +615,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
      if (sym == NULL) {
          sym = addSymbol(name, SymClass_Subroutine);
      }
-@@ -5271,7 +5330,9 @@
+@@ -5271,7 +5432,9 @@ static void parseCALL(char *s) {
      frameSize = 0;
      s = eatWsp(s);
      if (*s == '(') {
@@ -401,7 +625,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
          s = eatWsp(s);
      }
      if (*s != '\0') {
-@@ -6528,12 +6589,15 @@
+@@ -6528,12 +6691,15 @@ static void parseOutputStmt(char *s, int unitNum) {
          return;
      }
      s = eatWsp(s);
@@ -419,7 +643,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
      if (s != NULL) {
          ciList->unit = createIntegerConstant(unitNum);
          outputInit(ciList);
-@@ -6896,12 +6960,14 @@
+@@ -6896,12 +7062,14 @@ static void parseREAD(char *s) {
              return;
          }
          s = eatWsp(s);
@@ -436,7 +660,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
          ciList->unit = createIntegerConstant(DEFAULT_INPUT_UNIT);
      }
      s = parseIoList(s, FALSE, &ioList);
-@@ -6921,7 +6987,27 @@
+@@ -6921,7 +7089,27 @@ static void parseRETURN(char *s) {
      }
      s = eatWsp(s);
      if (*s != '\0') {
@@ -465,7 +689,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
      }
      emitBranch(progUnitSym->details.progUnit.exitLabel);
  }
-@@ -7831,6 +7917,12 @@
+@@ -7831,6 +8019,12 @@ static bool validateDataInitializer(StorageReference *ref, ConstantListItem *con
      }
      enableEmission(FALSE);
      ec = errorCount;
@@ -478,7 +702,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
      dt = getSymbolType(symbol);
      type = dt->type;
      rank = symbol->details.variable.dt.rank;
-@@ -7949,6 +8041,15 @@
+@@ -7949,6 +8143,15 @@ static bool validateDataInitializer(StorageReference *ref, ConstantListItem *con
                      cListItem->details.value.integer = (i64)cListItem->details.value.real;
                      break;
                  case BaseType_Character:
@@ -494,10 +718,11 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/compile.c b
                  case BaseType_Complex:
                  default:
                      err("Data value for %s cannot be coerced to INTEGER", symbol->identifier);
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/global.c b/fortran/global.c
---- a/fortran/global.c	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/global.c	2026-10-11 20:42:01.143482351 -0400
-@@ -35,6 +35,7 @@
+diff --git a/fortran/global.c b/fortran/global.c
+index a37ccf7..da92988 100644
+--- a/fortran/global.c
++++ b/fortran/global.c
+@@ -35,6 +35,7 @@ bool  doSuppressWarnings    = FALSE;
  bool  doList                = TRUE;
  bool  doStaticLocals        = TRUE;
  bool  doStaticLocalsDefault = TRUE;
@@ -505,10 +730,11 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/global.c b/
  int   errorCount            = 0;
  int   lineNo                = 0;
  FILE *listingFile           = NULL;
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/intrinsic/amin0.c b/fortran/intrinsic/amin0.c
---- a/fortran/intrinsic/amin0.c	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/intrinsic/amin0.c	2026-10-11 20:42:01.128361560 -0400
-@@ -8,9 +8,9 @@
+diff --git a/fortran/intrinsic/amin0.c b/fortran/intrinsic/amin0.c
+index db7a80a..c786a2c 100644
+--- a/fortran/intrinsic/amin0.c
++++ b/fortran/intrinsic/amin0.c
+@@ -8,9 +8,9 @@ double _amin0(unsigned long waddr, ...) {
  
      count = *((long *)(waddr << 3));
      va_start(ap, waddr);
@@ -520,9 +746,10 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/intrinsic/a
          if (item < res) res = item;
      }
      va_end(ap);
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/intrinsic/isign.c b/fortran/intrinsic/isign.c
---- a/fortran/intrinsic/isign.c	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/intrinsic/isign.c	2026-10-11 20:42:01.124763561 -0400
+diff --git a/fortran/intrinsic/isign.c b/fortran/intrinsic/isign.c
+index 25ee7bd..5027c74 100644
+--- a/fortran/intrinsic/isign.c
++++ b/fortran/intrinsic/isign.c
 @@ -1,5 +1,6 @@
  long _iabs(unsigned long waddr);
  
@@ -531,10 +758,24 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/intrinsic/i
 +    /* the second argument is an integer: taken as a real, its test raises a floating point error */
 +    return (*((long *)(waddrb << 3)) >= 0) ? _iabs(waddra) : -(_iabs(waddra));
  }
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/main.c b/fortran/main.c
---- a/fortran/main.c	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/main.c	2026-10-11 20:42:01.142153768 -0400
-@@ -81,6 +81,7 @@
+diff --git a/fortran/lex.c b/fortran/lex.c
+index 751d455..f107797 100644
+--- a/fortran/lex.c
++++ b/fortran/lex.c
+@@ -409,7 +409,7 @@ char *getNextChar(char *s) {
+ char *getNextToken(char *s, Token *token, bool doMatchKeywords) {
+     char *dp;
+     char *start;
+-    int value;
++    u64 value;
+ 
+     memset(token, 0, sizeof(Token));
+     s = getNextChar(s);
+diff --git a/fortran/main.c b/fortran/main.c
+index d7fe044..0f940d5 100644
+--- a/fortran/main.c
++++ b/fortran/main.c
+@@ -81,6 +81,7 @@ int main(int argc, char *argv[]) {
  #define L_KEY "L="
  #define O_KEY "O="
  #define S_KEY "S"
@@ -542,7 +783,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/main.c b/fo
  #define W_KEY "W"
  #define STDIN  "$IN"
  #define STDOUT "$OUT"
-@@ -90,6 +91,7 @@
+@@ -90,6 +91,7 @@ int main(int argc, char *argv[]) {
  #define L_KEY "-l"
  #define O_KEY "-o"
  #define S_KEY "-s"
@@ -550,7 +791,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/main.c b/fo
  #define W_KEY "-w"
  #define STDIN  "-"
  #define STDOUT "-"
-@@ -183,6 +185,9 @@
+@@ -183,6 +185,9 @@ static char *parseOptions(int argc, char *argv[]) {
          else if (strcmp(argv[i], W_KEY) == 0) {
              doSuppressWarnings = TRUE;
          }
@@ -560,7 +801,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/main.c b/fo
  #if defined(__cos)
          else {
              usage();
-@@ -218,7 +223,7 @@
+@@ -218,7 +223,7 @@ static char *parseOptions(int argc, char *argv[]) {
  
  static void usage(void) {
  #if defined(__cos)
@@ -569,7 +810,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/main.c b/fo
      fputs("  ALLOC=key - variable storage allocation strategy\n", stderr);
      fputs("              STATIC : variables are allocated in static storage\n", stderr);
      fputs("              STACK or AUTO : variables are allocated on the runtime stack\n", stderr);
-@@ -227,7 +232,7 @@
+@@ -227,7 +232,7 @@ static void usage(void) {
      fputs("  O=ofile   - output file (default ZZZZCAL)\n", stderr);
      fputs("  S         - echo source code lines to output file\n", stderr);
  #else
@@ -578,10 +819,11 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/main.c b/fo
      fputs("  -a key    - variable storage allocation strategy\n", stderr);
      fputs("              static : variables are allocated in static storage\n", stderr);
      fputs("              stack or auto : variables are allocated on the runtime stack\n", stderr);
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/proto.h b/fortran/proto.h
---- a/fortran/proto.h	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/proto.h	2026-10-11 20:42:01.118644686 -0400
-@@ -77,6 +77,7 @@
+diff --git a/fortran/proto.h b/fortran/proto.h
+index fead8a4..a05804c 100644
+--- a/fortran/proto.h
++++ b/fortran/proto.h
+@@ -77,6 +77,7 @@ extern int autoOffset;
  extern char currentDate[];
  extern char currentTime[];
  extern bool doEchoSource;
@@ -589,9 +831,10 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/proto.h b/f
  extern bool doList;
  extern bool doStaticLocals;
  extern bool doStaticLocalsDefault;
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/const.h b/fortran/runtime/const.h
---- a/fortran/runtime/const.h	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/runtime/const.h	2026-10-11 20:42:01.123071061 -0400
+diff --git a/fortran/runtime/const.h b/fortran/runtime/const.h
+index dc50566..35f3359 100644
+--- a/fortran/runtime/const.h
++++ b/fortran/runtime/const.h
 @@ -28,7 +28,7 @@
  #define MAX_ALLOCATED_UNITS  20
  #define MAX_BUF_SIZE        256
@@ -601,10 +844,11 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/con
  #define MAX_FMT_LEN        1024
  #define MAX_FMT_RECL        152
  #define MAX_UNIT_NUMBER     102
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/fmt.c b/fortran/runtime/fmt.c
---- a/fortran/runtime/fmt.c	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/runtime/fmt.c	2026-10-11 20:42:01.122614019 -0400
-@@ -145,9 +145,12 @@
+diff --git a/fortran/runtime/fmt.c b/fortran/runtime/fmt.c
+index d889017..ac4ae2d 100644
+--- a/fortran/runtime/fmt.c
++++ b/fortran/runtime/fmt.c
+@@ -145,9 +145,12 @@ void _inpdbl(int unitNum, f64 *value) {
  }
  
  void _inpfmt(void *value) {
@@ -617,7 +861,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/fmt
      char *s;
      u64 word;
  
-@@ -173,24 +176,19 @@
+@@ -173,24 +176,19 @@ void _inpfmt(void *value) {
              s = (char *)(charRef & 0xffffffff);
              len = charRef >> 32;
              if (len == 0) { // value is not type CHARACTER
@@ -653,10 +897,11 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/fmt
              }
              else {
                  fieldWidth = (nextDesc->width == 0) ? len : nextDesc->width;
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/fmt2.c b/fortran/runtime/fmt2.c
---- a/fortran/runtime/fmt2.c	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/runtime/fmt2.c	2026-10-11 20:42:01.121992103 -0400
-@@ -29,13 +29,44 @@
+diff --git a/fortran/runtime/fmt2.c b/fortran/runtime/fmt2.c
+index 02ce009..97a2729 100644
+--- a/fortran/runtime/fmt2.c
++++ b/fortran/runtime/fmt2.c
+@@ -29,13 +29,44 @@ static char fmtBuf[MAX_FMT_LEN+1];
  
  void _prsfmt(unsigned long strDesc) {
      char *bp;
@@ -702,22 +947,50 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/fmt
      *bp = '\0';
  
      _przfmt(fmtBuf);
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/units.c b/fortran/runtime/units.c
---- a/fortran/runtime/units.c	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/runtime/units.c	2026-10-11 20:42:01.121483561 -0400
-@@ -39,6 +39,11 @@
+diff --git a/fortran/runtime/units.c b/fortran/runtime/units.c
+index 57f3ac0..637d675 100644
+--- a/fortran/runtime/units.c
++++ b/fortran/runtime/units.c
+@@ -39,6 +39,13 @@ static char unitName[8] = {'U','N','I','T','0','0','0',0};
  static Unit units[MAX_ALLOCATED_UNITS];
  
  static void closeUnit(Unit *up, int doDelete);
-+static int daLoad(Unit *up);
++static int daClose(Unit *up, int doDelete);
++static int daLoad(DaFile *fp);
++static int daOpen(Unit *up, char *fileName, int recLen, int unformatted, int doLoad);
 +static int daRead(Unit *up, char *dst, int n);
-+static int daReserve(Unit *up, int recs);
-+static int daSave(Unit *up);
++static int daReserve(DaFile *fp, int recs);
++static int daSave(DaFile *fp);
 +static int daWrite(Unit *up, char *src, int n);
  static void copyStrToRef(char *s1, ulong ref);
  static Unit *getUnit(int unitNum, int flags, int recLen);
  static int openUnit(char *fileName, int unitNum, int flags, int recLen);
-@@ -141,6 +146,7 @@
+@@ -109,6 +116,8 @@ void _endfio(void) {
+     }
+ }
+ 
++static Unit *lastFound = NULL;
++
+ Unit *_findu(int unitNum) {
+     int i;
+     Unit *up;
+@@ -120,9 +129,14 @@ Unit *_findu(int unitNum) {
+         }
+     }
+     else {
++        /* a transfer asks for its unit with every item: the one found last is tried first */
++        if (lastFound != NULL && lastFound->number == unitNum) return lastFound;
+         for (i = 0; i < MAX_ALLOCATED_UNITS; i++) {
+             up = &units[i];
+-            if (up->number == unitNum) return up;
++            if (up->number == unitNum) {
++                lastFound = up;
++                return up;
++            }
+         }
+     }
+     return NULL;
+@@ -141,6 +155,7 @@ void _flufmt(int unitNum) {
          ref = _getrcd();
          refToCharPtr(ref, &s, &len);
          if (writer(up, s, len) != len || eor == 0) break;
@@ -725,7 +998,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
      }
  }
  
-@@ -174,6 +180,10 @@
+@@ -174,6 +189,10 @@ void _inbchr(int unitNum, unsigned long ref) {
      if (up->ioStat != 0) return;
      s = (char *)(ref & 0xffffffff);
      len = ref >> 32;
@@ -736,7 +1009,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
      n = read(up->fd, s, len);
      if (n == len) {
          up->ioStat = 0;
-@@ -196,6 +206,10 @@
+@@ -196,6 +215,10 @@ void _inbwrd(int unitNum, u64 *value) {
  
      up = getUnit(unitNum, MASK_UNFORMATTED, MAX_FMT_RECL);
      if (up->ioStat != 0) return;
@@ -747,7 +1020,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
      n = read(up->fd, (u8 *)value, sizeof(u64));
      if (n == sizeof(u64)) {
          up->ioStat = 0;
-@@ -433,6 +447,17 @@
+@@ -433,6 +456,17 @@ void _rdurec(int unitNum) {
      limit = s + len;
      up = getUnit(unitNum, 0, MAX_FMT_RECL);
      if (up->ioStat != 0) return;
@@ -765,7 +1038,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
      if (up->buf == NULL) {
          up->buf = (char *)malloc(MAX_BUF_SIZE);
          if (up->buf == NULL) {
-@@ -482,7 +507,12 @@
+@@ -482,7 +516,12 @@ void _rewndu(int unitNum) {
          up->ioStat = EBADF;
          return;
      }
@@ -779,7 +1052,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
          up->ioStat = errno;
      }
      else {
-@@ -490,6 +520,27 @@
+@@ -490,6 +529,27 @@ void _rewndu(int unitNum) {
      }
  }
  
@@ -807,7 +1080,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
  void _wrbchr(int unitNum, unsigned long ref) {
      int len;
      int n;
-@@ -500,6 +551,10 @@
+@@ -500,6 +560,10 @@ void _wrbchr(int unitNum, unsigned long ref) {
      if (up->ioStat != 0) return;
      s = (char *)(ref & 0xffffffff);
      len = ref >> 32;
@@ -818,7 +1091,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
      n = write(up->fd, s, len);
      if (n == len) {
          up->ioStat = 0;
-@@ -518,6 +573,10 @@
+@@ -518,6 +582,10 @@ void _wrbwrd(int unitNum, u64 *value) {
  
      up = getUnit(unitNum, MASK_UNFORMATTED, MAX_FMT_RECL);
      if (up->ioStat != 0) return;
@@ -829,7 +1102,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
      n = write(up->fd, (u8 *)value, sizeof(u64));
      if (n == sizeof(u64)) {
          up->ioStat = 0;
-@@ -559,7 +618,23 @@
+@@ -559,7 +627,14 @@ void _wrufmt(int unitNum, DataValue *value) {
  static void closeUnit(Unit *up, int doDelete) {
      if (up != NULL && (up->flags & MASK_IMMUTABLE) == 0) {
          up->ioStat = 0;
@@ -837,24 +1110,15 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
 +        if ((up->flags & MASK_DIRECT) != 0) {
 +            if ((up->flags & MASK_OPEN) != 0) {
 +                up->flags ^= MASK_OPEN;
-+                if (doDelete) {
-+                    unlink(up->fileName);
-+                }
-+                else if (up->daDirty) {
-+                    up->ioStat = daSave(up);
-+                }
-+                if (up->daBuf != NULL) {
-+                    free(up->daBuf);
-+                    up->daBuf = NULL;
-+                }
-+                up->daRecs = up->daMax = 0;
++                up->ioStat = daClose(up, doDelete);
++                if (doDelete) unlink(up->fileName);
 +            }
 +        }
 +        else if (up->fd > 2 && (up->flags & MASK_OPEN) != 0) {
              up->flags ^= MASK_OPEN;
              if (close(up->fd) == -1) {
                  up->ioStat = errno;
-@@ -653,6 +728,32 @@
+@@ -653,6 +728,33 @@ static int openUnit(char *fileName, int unitNum, int flags, int recLen) {
      strcpy(up->fileName, fileName);
      mode = 0;
  
@@ -872,14 +1136,15 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
 +        up->fd = -1;
 +        up->daRec = 1;
 +        if (_exists(fileName) != 0) {
-+            if ((flags & MASK_NEW) == 0) {
-+                rc = daLoad(up);
-+                if (rc != 0) return rc;
-+            }
++            rc = daOpen(up, fileName, recLen, (flags & MASK_UNFORMATTED) != 0, (flags & MASK_NEW) == 0);
 +        }
 +        else if ((flags & MASK_OLD) != 0) {
 +            return ENOENT;
 +        }
++        else {
++            rc = daOpen(up, fileName, recLen, (flags & MASK_UNFORMATTED) != 0, 0);
++        }
++        if (rc != 0) return rc;
 +        up->flags = (flags & ~MASK_NEW) | MASK_OLD | MASK_OPEN;
 +        return 0;
 +    }
@@ -887,7 +1152,7 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
      if ((flags & MASK_NEW) != 0) {
          access = O_CREAT|O_TRUNC|O_RDWR;
          mode = 0640;
-@@ -677,6 +778,91 @@
+@@ -677,6 +779,185 @@ static int openUnit(char *fileName, int unitNum, int flags, int recLen) {
      return 0;
  }
  
@@ -896,29 +1161,50 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
 + *  (n - 1) * recLen of the file; a formatted record is blank-filled and
 + *  has no line end.
 + */
-+static int daReserve(Unit *up, int recs) {
-+    int n;
-+    char *nb;
++/*
++ *  The records are held in pieces of DA_PIECE records, so that a file
++ *  takes the room of its records and no more, and grows without being
++ *  copied.  A file that a second unit opens is the one in memory: both
++ *  units see the same records, and the file is written back when the
++ *  last of them closes it.
++ */
++#define DA_PIECE       64
++#define DA_PIECE_SHIFT 6
 +
-+    if (recs <= up->daRecs) return 0;
-+    n = (up->daRecs > 0) ? up->daRecs : 8;
-+    while (n < recs) n *= 2;
-+    nb = (char *)malloc(n * up->recLen);
-+    if (nb == NULL) return ENOMEM;
-+    memset(nb, (up->flags & MASK_UNFORMATTED) != 0 ? 0 : ' ', n * up->recLen);
-+    if (up->daBuf != NULL) {
-+        memcpy(nb, up->daBuf, up->daRecs * up->recLen);
-+        free(up->daBuf);
++static DaFile daFiles[MAX_ALLOCATED_UNITS];
++
++static char *daPtr(DaFile *fp, int rec) {
++    return fp->pieces[(rec - 1) >> DA_PIECE_SHIFT] + ((rec - 1) & (DA_PIECE - 1)) * fp->recLen;
++}
++
++static int daReserve(DaFile *fp, int recs) {
++    int i;
++    int n;
++    char **nt;
++    char *piece;
++
++    while (recs > fp->recs) {
++        n = fp->recs >> DA_PIECE_SHIFT;
++        if ((n & (n - 1)) == 0) { /* the table of pieces is full: twice the size */
++            nt = (char **)malloc(((n > 0) ? n * 2 : 1) * sizeof(char *));
++            if (nt == NULL) return ENOMEM;
++            for (i = 0; i < n; i++) nt[i] = fp->pieces[i];
++            if (fp->pieces != NULL) free(fp->pieces);
++            fp->pieces = nt;
++        }
++        piece = (char *)malloc(DA_PIECE * fp->recLen);
++        if (piece == NULL) return ENOMEM;
++        memset(piece, fp->unformatted ? 0 : ' ', DA_PIECE * fp->recLen);
++        fp->pieces[n] = piece;
++        fp->recs += DA_PIECE;
 +    }
-+    up->daBuf = nb;
-+    up->daRecs = n;
 +    return 0;
 +}
 +
 +static int daRead(Unit *up, char *dst, int n) {
-+    if (up->daRec > up->daMax) return -1; /* no such record */
++    if (up->daRec > up->da->max) return -1; /* no such record */
 +    if (up->daPos + n > up->recLen) return EIO; /* longer than a record */
-+    memcpy(dst, up->daBuf + (up->daRec - 1) * up->recLen + up->daPos, n);
++    memcpy(dst, daPtr(up->da, up->daRec) + up->daPos, n);
 +    up->daPos += n;
 +    return 0;
 +}
@@ -927,29 +1213,31 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
 +    int rc;
 +
 +    if (up->daPos + n > up->recLen) return EIO; /* longer than a record */
-+    rc = daReserve(up, up->daRec);
++    rc = daReserve(up->da, up->daRec);
 +    if (rc != 0) return rc;
-+    memcpy(up->daBuf + (up->daRec - 1) * up->recLen + up->daPos, src, n);
++    memcpy(daPtr(up->da, up->daRec) + up->daPos, src, n);
 +    up->daPos += n;
-+    if (up->daRec > up->daMax) up->daMax = up->daRec;
-+    up->daDirty = 1;
++    if (up->daRec > up->da->max) up->da->max = up->daRec;
++    up->da->dirty = 1;
 +    return 0;
 +}
 +
-+static int daLoad(Unit *up) {
++static int daLoad(DaFile *fp) {
 +    int fd;
 +    int have;
 +    int n;
++    int pieceLen;
 +    int rc;
 +
-+    fd = open(up->fileName, O_RDONLY|O_BINARY, 0);
++    fd = open(fp->fileName, O_RDONLY|O_BINARY, 0);
 +    if (fd == -1) return errno;
 +    have = 0;
 +    rc = 0;
++    pieceLen = DA_PIECE * fp->recLen;
 +    for (;;) {
-+        rc = daReserve(up, have / up->recLen + 1);
++        rc = daReserve(fp, have / fp->recLen + 1);
 +        if (rc != 0) break;
-+        n = read(fd, up->daBuf + have, up->daRecs * up->recLen - have);
++        n = read(fd, fp->pieces[have / pieceLen] + have % pieceLen, pieceLen - have % pieceLen);
 +        if (n < 0) {
 +            rc = errno;
 +            break;
@@ -958,28 +1246,99 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
 +        have += n;
 +    }
 +    close(fd);
-+    up->daMax = have / up->recLen;
++    fp->max = have / fp->recLen;
 +    return rc;
 +}
 +
-+static int daSave(Unit *up) {
++static int daSave(DaFile *fp) {
 +    int fd;
++    int i;
 +    int len;
++    int n;
 +    int rc;
 +
-+    fd = open(up->fileName, O_CREAT|O_TRUNC|O_WRONLY|O_BINARY, 0640);
++    fd = open(fp->fileName, O_CREAT|O_TRUNC|O_WRONLY|O_BINARY, 0640);
 +    if (fd == -1) return errno;
 +    rc = 0;
-+    len = up->daMax * up->recLen;
-+    if (len > 0 && write(fd, up->daBuf, len) != len) rc = errno;
++    len = fp->max * fp->recLen;
++    for (i = 0; len > 0 && rc == 0; i++) {
++        n = (len < DA_PIECE * fp->recLen) ? len : DA_PIECE * fp->recLen;
++        if (write(fd, fp->pieces[i], n) != n) rc = errno;
++        len -= n;
++    }
 +    if (close(fd) == -1 && rc == 0) rc = errno;
++    return rc;
++}
++
++/*
++ *  daOpen - the file of a name for a unit: the one another unit has open,
++ *  or a new one, read in if doLoad is set
++ */
++static int daOpen(Unit *up, char *fileName, int recLen, int unformatted, int doLoad) {
++    DaFile *fp;
++    DaFile *freeSlot;
++    int i;
++    int rc;
++
++    freeSlot = NULL;
++    for (i = 0; i < MAX_ALLOCATED_UNITS; i++) {
++        fp = &daFiles[i];
++        if (fp->users == 0) {
++            if (freeSlot == NULL) freeSlot = fp;
++        }
++        else if (strcmp(fp->fileName, fileName) == 0) {
++            if (fp->recLen != recLen) return EINVAL;
++            fp->users += 1;
++            up->da = fp;
++            return 0;
++        }
++    }
++    if (freeSlot == NULL) return ENFILE;
++    fp = freeSlot;
++    memset(fp, 0, sizeof(DaFile));
++    strcpy(fp->fileName, fileName);
++    fp->recLen = recLen;
++    fp->unformatted = unformatted;
++    fp->users = 1;
++    up->da = fp;
++    if (doLoad) {
++        rc = daLoad(fp);
++        if (rc != 0) {
++            daClose(up, 0);
++            return rc;
++        }
++    }
++    return 0;
++}
++
++/*
++ *  daClose - a unit gives its file up; the last one writes it back, or
++ *  with doDelete only lets it go
++ */
++static int daClose(Unit *up, int doDelete) {
++    DaFile *fp;
++    int i;
++    int rc;
++
++    fp = up->da;
++    up->da = NULL;
++    if (fp == NULL) return 0;
++    rc = 0;
++    fp->users -= 1;
++    if (fp->users > 0) return 0;
++    if (doDelete == 0 && fp->dirty) rc = daSave(fp);
++    if (fp->pieces != NULL) {
++        for (i = 0; i < (fp->recs >> DA_PIECE_SHIFT); i++) free(fp->pieces[i]);
++        free(fp->pieces);
++    }
++    memset(fp, 0, sizeof(DaFile));
 +    return rc;
 +}
 +
  static void refToCharPtr(ulong ref, char **s, int *len) {
      *s = (char *)(ref & 0xffffffff);
      *len = ref >> 32;
-@@ -697,10 +883,29 @@
+@@ -697,10 +978,29 @@ static int trim(char *s, int len) {
  }
  
  static int writer(Unit *up, void *buf, size_t nbyte) {
@@ -991,9 +1350,9 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
 +    if ((up->flags & MASK_DIRECT) != 0) { /* a record, blank-filled by daReserve */
 +        n = (nbyte < up->recLen) ? nbyte : up->recLen;
 +        up->daPos = 0;
-+        up->ioStat = daReserve(up, up->daRec);
++        up->ioStat = daReserve(up->da, up->daRec);
 +        if (up->ioStat != 0) return -1;
-+        memset(up->daBuf + (up->daRec - 1) * up->recLen, ' ', up->recLen);
++        memset(daPtr(up->da, up->daRec), ' ', up->recLen);
 +        up->ioStat = daWrite(up, (char *)buf, n);
 +        if (up->ioStat != 0) return -1;
 +        up->daRec += 1;
@@ -1011,23 +1370,43 @@ diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/uni
          n = write(up->fd, "\n", 1);
          if (n == 1) {
              up->ioStat = 0;
-diff -u -r -x '*.o' -x kftc -x '*.lst' -x '*.lib' -x '*.a' a/fortran/runtime/units.h b/fortran/runtime/units.h
---- a/fortran/runtime/units.h	2025-04-06 22:49:51.000000000 -0400
-+++ b/fortran/runtime/units.h	2026-10-11 20:42:01.122923644 -0400
-@@ -76,6 +76,12 @@
+diff --git a/fortran/runtime/units.h b/fortran/runtime/units.h
+index 25255be..2833c7a 100644
+--- a/fortran/runtime/units.h
++++ b/fortran/runtime/units.h
+@@ -61,6 +61,21 @@
+ 
+ typedef unsigned long ulong;
+ 
++/*
++ *  A direct access file is held in memory while a unit has it open, in
++ *  pieces of DA_PIECE records.  Units that open the same file share it.
++ */
++typedef struct daFile {
++    char fileName[MAX_FILE_NAME_LEN+1];
++    char **pieces; /* the records                        */
++    int  recLen;   /* length of a record                 */
++    int  recs;     /* records the pieces have room for   */
++    int  max;      /* highest record that exists         */
++    int  dirty;    /* 1 if a record has been written     */
++    int  users;    /* units that have the file open      */
++    int  unformatted;
++} DaFile;
++
+ typedef struct unit {
+     char fileName[MAX_FILE_NAME_LEN+1];
+     int  number;  /* unit number                        */
+@@ -76,6 +91,9 @@ typedef struct unit {
      char *buf;    /* dynamically allocated input buffer */
      char *out;    /* next available char in buffer      */
      char *limit;  /* last char in buffer + 1            */
-+    char *daBuf;  /* direct access: the records         */
-+    int  daRecs;  /* records the buffer has room for    */
-+    int  daMax;   /* highest record that exists         */
++    struct daFile *da; /* direct access: the file      */
 +    int  daRec;   /* record of the current transfer     */
 +    int  daPos;   /* byte position within that record   */
-+    int  daDirty; /* 1 if a record has been written     */
  } Unit;
  
  Unit *_allocu(int unitNum);
-@@ -93,6 +99,7 @@
+@@ -93,6 +111,7 @@ int  _queryu(int unitNum, ulong fileNameRef, long *existRef, long *openedRef, in
               int *reclRef, int *nextRecRef);
  void _rdufmt(int unitNum, void *value);
  void _rdurec(int unitNum);

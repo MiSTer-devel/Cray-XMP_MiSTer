@@ -1,0 +1,60 @@
+diff --git a/cosdataset.c b/cosdataset.c
+index c9675d2..ce7f051 100644
+--- a/cosdataset.c
++++ b/cosdataset.c
+@@ -352,7 +352,7 @@ int cosDsWriteEOF(Dataset *ds) {
+ 
+     if (ds->cursor >= COS_BLOCK_SIZE && flushBuffer(ds) == -1) return -1;
+     setFWI(ds);
+-    rcw = ((u64)COS_CW_EOF << 60) | ((ds->currentBlock - ds->lastFileBlock) << 24);
++    rcw = ((u64)COS_CW_EOF << 60) | ((u64)(ds->currentBlock - ds->lastFileBlock) << 24);
+     if (appendCW(ds, rcw) == -1) return -1;
+     ds->lastFileBlock = ds->lastRecordBlock = ds->currentBlock;
+     return 0;
+@@ -375,7 +375,7 @@ int cosDsWriteEOR(Dataset *ds) {
+     setFWI(ds);
+     rcw = ((u64)COS_CW_EOR << 60)
+         | ((u64)ubc << 50)
+-        | ((ds->currentBlock - ds->lastFileBlock) << 24)
++        | ((u64)(ds->currentBlock - ds->lastFileBlock) << 24)
+         | ((ds->currentBlock - ds->lastRecordBlock) << 9);
+     if (appendCW(ds, rcw) == -1) return -1;
+     ds->lastRecordBlock = ds->currentBlock;
+diff --git a/ldr.c b/ldr.c
+index 0e68c47..5e78210 100644
+--- a/ldr.c
++++ b/ldr.c
+@@ -1427,11 +1427,18 @@ static int processBRT(Dataset *ds, u64 hdr, int tableLength) {
+                            | (image[imageOffset+1] << 16)
+                            | (image[imageOffset+2] <<  8)
+                            |  image[imageOffset+3];
++                //
++                //  The address is the low 24 bits of the two parcels when it
++                //  counts parcels and the low 22 when it counts words. The
++                //  sum stays in them: an address written as a symbol less a
++                //  constant wraps around, and what is above the address (the
++                //  register of the instruction) is not part of it.
++                //
+                 if (isParcelRelocation) {
+-                    imageBytes += block->baseAddress << 2;
++                    imageBytes = (imageBytes & ~0xffffff) | ((imageBytes + (block->baseAddress << 2)) & 0xffffff);
+                 }
+                 else {
+-                    imageBytes += block->baseAddress;
++                    imageBytes = (imageBytes & ~0x3fffff) | ((imageBytes + block->baseAddress) & 0x3fffff);
+                 }
+                 image[imageOffset  ] =  imageBytes >> 24;
+                 image[imageOffset+1] = (imageBytes >> 16) & 0xff;
+diff --git a/parse.c b/parse.c
+index c53f978..05fa098 100644
+--- a/parse.c
++++ b/parse.c
+@@ -1294,7 +1294,7 @@ char *getNextToken(char *s, Token *token) {
+                 token->details.name.len = MAX_NAME_LENGTH;
+                 token->details.name.qualPtr = NULL;
+                 token->details.name.qualLen = 0;
+-                strcpy(start + MAX_NAME_LENGTH, s);
++                memmove(start + MAX_NAME_LENGTH, s, strlen(s) + 1);
+                 s = start + MAX_NAME_LENGTH;
+             }
+             else {

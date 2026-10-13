@@ -121,6 +121,38 @@ an operator would see. `--log FILE` writes every channel function of every
 I/O Processor. The header of `tools/crates/ios/src/bin/cray-xmp-sys.rs` lists
 the script steps and the options, among them the timing of the devices.
 
+### A program without COS
+
+`cray-xmp-job` runs a program built for COS on the CPU model alone. It loads
+an absolute binary as COS's loader would and answers the program's system
+requests itself, which are the ones the libraries of the
+[cross-compilers](#programs-in-c) make: the end of the program, a line for the
+log, the date and the clocks, local datasets with buffered I/O, the circular
+I/O of a session's `$IN` and `$OUT`, and a request for more memory. Any other
+request stops the run with a message that names it.
+
+```sh
+tools/target/release/cray-xmp-job hello.abs
+tools/target/release/cray-xmp-job prog.abs --in lines.txt --ds DATA=data.bin --profile prog.map
+```
+
+`$IN` is the terminal, or the lines of `--in`; `$OUT` is the terminal. A
+dataset is a file on the computer: `--ds NAME=FILE` in COS's blocked format,
+which is what `expdisk.py put` takes, or `--text NAME=FILE` as text. A dataset
+the program wrote is written back to its file at the end. `--profile` with the
+loader's map (`ldr -m`) lists the instructions executed by routine, and
+`--trace` every request. A program that is interrupted (an address outside its
+field, a floating point error) ends the run with the place and its registers.
+The header of `tools/crates/job/src/bin/cray-xmp-job.rs` has the options.
+
+A run is a second where the system model with COS takes minutes, and its
+counts of instructions are exact. Its times are not: every instruction takes
+four clock periods, as on the system model. And it is not COS: what a program
+does with a request the tool answers differently than COS would only shows
+under COS. The tool is also in the image of the cross-compilers, where the
+chess program of [Cray-COS-Games](https://github.com/jakesjews/Cray-COS-Games)
+uses it to make its opening book.
+
 The tests that run this software look for it in the directory the
 environment variable `CRAY_XMP_SYSTEM` names: the ready-to-run COS 1.17 of
 the cray-sim project after its install, with the nine drive images. Without
@@ -404,8 +436,9 @@ runs on another computer and calls the assembler and the loader of
 builds both, at the commits the programs on the drive were built from:
 
 ```sh
-docker build -t cray-ack tools/ack
+docker build -t cray-ack -f tools/ack/Dockerfile tools
 docker run --rm -v "$PWD":/work cray-ack ack -mcos -o hello.abs hello.c
+docker run --rm -v "$PWD":/work cray-ack cray-xmp-job hello.abs    # try it
 python3 tools/py/expdisk.py put exp_disk.img BIN/HELLO hello.abs
 python3 tools/py/expdisk.py puttext exp_disk.img STATION/JHELLO jhello.txt
 ```
@@ -442,12 +475,25 @@ again (`expdisk.py rm`).
   loader asks for the program alone, and only a small program inherits room
   from the control statement processor before it. The image's startup code
   asks COS for memory when fewer than 40,960 words are free (the same
-  patch). Without it a program of a million words could not open a file.
+  patch). Without it a program of a million words could not open a file. A
+  program that needs more says so in a word of its own, `long _heapwds =
+  380000;` in C.
 - A FORTRAN direct access file (`ACCESS='DIRECT'`, `REC=`) is held in memory
   while it is open: read whole at `OPEN`, written whole at `CLOSE` or when
   the program ends, because the kit reads and writes a COS dataset in
-  sequence. It has to fit in the heap, and a program that is aborted does
-  not write it back.
+  sequence. It has to fit in the heap (see `_heapwds`), and a program that
+  is aborted does not write it back. Units that open the same file share it.
+- The kit as it comes did integer multiplication, division and remainders in
+  floating point, and wrongly for some numbers: the machine divides by a
+  reciprocal that is close and not exact, so `1025000 / 1000` was 1024 and
+  131070 was printed as `131060`. Its `realloc` wrote past the end of a
+  block that grew by less than a block. Both are put right in the image
+  (`ack-cos.patch`), and `memcpy`, `memset` and a binary `read` move words
+  where they went a byte at a time.
+- Three faults of COS-Tools are put right too (`cos-tools.patch`): the
+  loader let an address that wraps around, a symbol less a constant, carry
+  into the register field of its instruction, and a program of certain
+  lengths above 127 blocks got an end of data where its record ends.
 - The kit also compiles Pascal and BASIC. A first program in each did not
   link here (`Unsatisfied external reference`), and that was not followed up.
 - On Linux the assembler of COS-Tools needs the one-line change the
@@ -472,12 +518,25 @@ else the compiler and its runtime lacked for such programs: `PRINT f` with
 no list, `RETURN` with an expression, A input into a word left-justified,
 direct access records (the record number was ignored), a fresh record after
 a `/` at the end of a format, and room for formats of 256 descriptors.
+
+The same patch has the bit functions of Cray FORTRAN compiled in line (`AND`,
+`OR`, `XOR`, `NOT` and `ISHFT`, with `IAND`, `IOR`, `IEOR` and `COMPL`), and
+the product of two integers below 2**24. Each was a call, and the compiler's
+code is what it is otherwise: a statement at a time, every value through
+memory. An octal or hexadecimal constant (`O'17'`, `X'FF'`) has all its 64
+bits; it was cut to 32, so that a mask of 40 bits was all ones.
+
+Routines in Cray's assembly language link with the compiler's code: its
+external names have an `@` before them, it keeps its stack, frame and heap
+pointers in A7, A6 and A5 and uses no B register but B00, it passes the
+addresses of arguments on the stack and takes a function's result from S7.
 Two games are built with it, in a repository of their own,
 [Cray-COS-Games](https://github.com/jakesjews/Cray-COS-Games): Super Star
 Trek of 1983, whose `prime2cray.py` shows what else such a program needs
 before the compiler takes it, and Cray Blitz, the chess program of 1991,
 whose `blitz2cray.py` and `lib/blitz.c` show what a Cray program of the time
-needs (the bit intrinsics and RANF as functions, the clocks).
+needs: RANF and the clocks, and its routines in assembly language, written
+for Cray's own compiler, joined to the kit's.
 
 ## Testing on a MiSTer
 
