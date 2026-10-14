@@ -167,3 +167,98 @@ fn an_address_outside_the_field_is_a_fault() {
         End::Fault("operand range error at P = 200c".into())
     );
 }
+
+#[test]
+fn memory_above_the_binary_up_to_its_high_limit_is_the_programs() {
+    // blank common is left out of the binary: the high limit in its header
+    // says how far the program reaches
+    let assembly = cray_xmp_asm::assemble_source(
+        "         ORG       200\nSTART    S1        5\n         250000,   S1\n         S0        0\n         EX\n",
+    );
+    let start = assembly.symbol("START").unwrap().value as u64;
+    let mut data = absolute(&assembly.image(), start);
+    let without = Program::from_dataset(&data).unwrap();
+    let mut job = Job::new(&without, Options::default(), Box::new(std::io::sink())).unwrap();
+    assert!(matches!(job.run(100), End::Fault(_)));
+
+    // word 14 (octal) of the header entry, after the block control word
+    // and the header word
+    let at = (1 + 1 + 0o14) * 8;
+    data[at..at + 8].copy_from_slice(&0o300000u64.to_be_bytes());
+    let with = Program::from_dataset(&data).unwrap();
+    assert_eq!(with.limit, 0o300000);
+    let mut job = Job::new(&with, Options::default(), Box::new(std::io::sink())).unwrap();
+    assert_eq!(job.run(100), End::Done);
+}
+
+#[test]
+fn an_attention_goes_to_the_reprieve_routine_and_the_program_goes_on() {
+    // reprieve set for the attention class; the routine counts in S7 of the
+    // saved package (A1 points at it) and goes on with it; the program
+    // waits for two and ends
+    let assembly = cray_xmp_asm::assemble_source(
+        "         ORG       200
+START    S1        ROUTINE        a parcel address
+         TABLE,    S1
+         S1        SAVE
+         TABLE+1,  S1
+         S1        TABLE
+         S2        0
+         S0        45             F$RPV: set
+         EX
+         S7        0
+WAIT     S0        S7
+         S1        2
+         S0        S7-S1
+         JSN       WAIT
+         S0        0
+         EX
+ROUTINE  A1        SAVE           entered with the program's registers
+         S7        SAVE+17,       S7 of the package (octal 17)
+         S6        1
+         S7        S7+S6
+         SAVE+17,  S7
+         S1        TABLE
+         S2        0
+         S0        45             set again
+         EX
+         S1        SAVE
+         S2        -1
+         S0        45             go on
+         EX
+TABLE    BSSZ      2
+         CON       10000
+SAVE     BSSZ      40
+",
+    );
+    assert!(!assembly.has_errors(), "{}", assembly.listing_text());
+    let start = assembly.symbol("START").unwrap().value as u64;
+    let program = Program::from_dataset(&absolute(&assembly.image(), start)).unwrap();
+    let run = |attentions: Vec<u64>| {
+        let options = Options {
+            attentions,
+            log: false,
+            ..Options::default()
+        };
+        let mut job = Job::new(&program, options, Box::new(std::io::sink())).unwrap();
+        job.run(100_000)
+    };
+    assert_eq!(run(vec![1000, 2000]), End::Done);
+    // without a second one it waits until the instruction limit
+    assert_eq!(run(vec![1000]), End::Limit);
+}
+
+#[test]
+fn an_attention_without_reprieve_ends_the_program() {
+    let assembly =
+        cray_xmp_asm::assemble_source("         ORG       200\nSTART    J         START\n");
+    let start = assembly.symbol("START").unwrap().value as u64;
+    let program = Program::from_dataset(&absolute(&assembly.image(), start)).unwrap();
+    let options = Options {
+        attentions: vec![100],
+        log: false,
+        ..Options::default()
+    };
+    let mut job = Job::new(&program, options, Box::new(std::io::sink())).unwrap();
+    assert_eq!(job.run(10_000), End::Aborted);
+}

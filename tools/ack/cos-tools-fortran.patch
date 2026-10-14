@@ -1,5 +1,26 @@
+diff --git a/fortran/Makefile b/fortran/Makefile
+index 3f74294..b737d0b 100755
+--- a/fortran/Makefile
++++ b/fortran/Makefile
+@@ -42,6 +42,7 @@ OBJS = binops.o   \
+        compile.o  \
+        fnv32a.o   \
+        global.o   \
++       jumps.o    \
+        lex.o      \
+        list.o     \
+        main.o     \
+@@ -86,6 +87,8 @@ fnv32a.o: fnv32a.c fnv.h
+ 	$(CC) $(CFLAGS) -c $<
+ global.o: global.c $(HDRS)
+ 	$(CC) $(CFLAGS) -c $<
++jumps.o: jumps.c $(HDRS)
++	$(CC) $(CFLAGS) -c $<
+ lex.o: lex.c $(HDRS)
+ 	$(CC) $(CFLAGS) -c $<
+ list.o: list.c $(HDRS)
 diff --git a/fortran/codegen.c b/fortran/codegen.c
-index 906187e..fc15212 100644
+index 906187e..64ecad6 100644
 --- a/fortran/codegen.c
 +++ b/fortran/codegen.c
 @@ -408,6 +408,17 @@ void emitCatChar(OperatorArgument *leftArg, OperatorArgument *rightArg) {
@@ -186,7 +207,28 @@ index 906187e..fc15212 100644
  }
  
  void emitMulOffset(Register reg, int factor) {
-@@ -1935,6 +2058,10 @@ void emitProlog(Symbol *sym, bool isEntry) {
+@@ -1857,6 +1980,20 @@ void emitNeReal(OperatorArgument *leftArg, OperatorArgument *rightArg) {
+     emit("         S%o        0\n", rightArg->reg);
+ }
+ 
++/* the magnitude of the integer in a register */
++void emitAbsInt(Register reg) {
++    emit("         S0        S%o\n", reg);
++    emit("         JSP       *+3\n");
++    emit("         S%o        -S%o\n", reg, reg);
++}
++
++/* min (or max) of the integers in two registers, into the first */
++void emitMinMaxInt(Register acc, Register reg, bool isMax) {
++    emit("         S0        S%o-S%o\n", reg, acc);
++    emit("         %s       *+3\n", isMax ? "JSM" : "JSP");
++    emit("         S%o        S%o\n", acc, reg);
++}
++
+ void emitNeqvInt(OperatorArgument *leftArg, OperatorArgument *rightArg) {
+     emit("         S%o        S%o\\S%o\n", rightArg->reg, leftArg->reg, rightArg->reg);
+ }
+@@ -1935,6 +2072,10 @@ void emitProlog(Symbol *sym, bool isEntry) {
      emit("         A6        A7\n");    /* set new base pointer */
      emit("         A1        %s,\n", isEntry ? progUnitSym->details.progUnit.frameSizeLabel : sym->details.progUnit.frameSizeLabel);
      emit("         A7        A7-A1\n"); /* reserve space for local variables */
@@ -197,7 +239,7 @@ index 906187e..fc15212 100644
      if (isEntry) {
          emit("%-8s BSS       0\n", skipLabel);
      }
-@@ -2113,10 +2240,10 @@ void emitStaticInitializer(StorageAttributes *attrs, ConstantListItem *constantL
+@@ -2113,10 +2254,10 @@ void emitStaticInitializer(StorageAttributes *attrs, ConstantListItem *constantL
              }
              break;
          case BaseType_Logical:
@@ -211,7 +253,7 @@ index 906187e..fc15212 100644
          case BaseType_Double:
          case BaseType_Real:
 diff --git a/fortran/codegen.h b/fortran/codegen.h
-index be5edba..1caf430 100644
+index be5edba..3d7bc58 100644
 --- a/fortran/codegen.h
 +++ b/fortran/codegen.h
 @@ -57,6 +57,7 @@ void emitCalcTrip1(DoStackEntry *entry, BaseType type);
@@ -240,6 +282,15 @@ index be5edba..1caf430 100644
  void emitMulOffset(Register reg, int factor);
  void emitMulReal(OperatorArgument *leftArg, OperatorArgument *rightArg);
  void emitMulSize(Register reg, Symbol *sym);
+@@ -123,6 +128,8 @@ void emitNegReg(Register reg, BaseType type);
+ void emitNeInt(OperatorArgument *leftArg, OperatorArgument *rightArg);
+ void emitNeLog(OperatorArgument *leftArg, OperatorArgument *rightArg);
+ void emitNeReal(OperatorArgument *leftArg, OperatorArgument *rightArg);
++void emitMinMaxInt(Register acc, Register reg, bool isMax);
++void emitAbsInt(Register reg);
+ void emitNeqvInt(OperatorArgument *leftArg, OperatorArgument *rightArg);
+ void emitNotReg(Register reg, BaseType type);
+ void emitOrInt(OperatorArgument *leftArg, OperatorArgument *rightArg);
 diff --git a/fortran/coercion.c b/fortran/coercion.c
 index b798da4..cf30a92 100644
 --- a/fortran/coercion.c
@@ -326,18 +377,30 @@ index 5f1a77d..ed07796 100644
  
  #endif
 diff --git a/fortran/compile.c b/fortran/compile.c
-index c7dec54..e86f42b 100644
+index c7dec54..be6f353 100644
 --- a/fortran/compile.c
 +++ b/fortran/compile.c
-@@ -59,6 +59,7 @@ static Symbol *defineNameListDoVar(char *varId);
+@@ -59,6 +59,10 @@ static Symbol *defineNameListDoVar(char *varId);
  static char *eatWsp(char *s);
  static void errArgType(OperatorId op, BaseType type, OperatorArgument *arg);
  static bool evaluateArrayRef(Symbol *symbol, TokenListItem *subscriptList, OperatorArgument *offset);
 +static bool evaluateBitFunction(Token *fn, int id);
++static bool evaluateMinMax(Token *fn, int id);
++static bool isIntegerExpr(Token *t);
++static int minMaxId(char *name);
  static bool evaluateExpression(Token *expression, OperatorArgument *result);
  static bool evaluateExprHelper(Token *expression);
  static bool evaluateFmtSpec(ControlInfoList *ciList);
-@@ -228,6 +229,7 @@ static Symbol *currentLabel;
+@@ -191,6 +195,8 @@ static void parsePROGRAM(char *s);
+ static void parsePUNCH(char *s);
+ static void parseREAD(char *s);
+ static void parseRETURN(char *s);
++static void parseBACKSPACE(char *s);
++static void parsePositioning(char *s, char *routine);
+ static void parseREWIND(char *s);
+ static void parseWRITE(char *s);
+ 
+@@ -228,6 +234,7 @@ static Symbol *currentLabel;
  static char lineBuf[MAX_LINE_LENGTH+1];
  static ParsingState state;
  
@@ -345,7 +408,15 @@ index c7dec54..e86f42b 100644
  static OperatorArgument argStack[MAX_ARG_STACK_SIZE];
  static int argStkPtr = 0;
  static DoStackEntry doStack[MAX_DO_STACK_SIZE];
-@@ -1032,6 +1034,103 @@ static bool evaluateArrayRef(Symbol *symbol, TokenListItem *subscriptList, Opera
+@@ -700,6 +707,7 @@ void compile(char *name) {
+                     parseASSIGN(s);
+                     break;
+                 case BACKSPACE:
++                    parseBACKSPACE(s);
+                     break;
+                 case CALL:
+                     parseCALL(s);
+@@ -1032,6 +1040,207 @@ static bool evaluateArrayRef(Symbol *symbol, TokenListItem *subscriptList, Opera
      return FALSE;
  }
  
@@ -368,6 +439,110 @@ index c7dec54..e86f42b 100644
 +    if (strcasecmp(name, "NOT") == 0 || strcasecmp(name, "COMPL") == 0) return BitFn_Not;
 +    if (strcasecmp(name, "ISHFT") == 0) return BitFn_Shift;
 +    return 0;
++}
++
++/*
++ *  MIN and MAX (MIN0, MAX0) and ABS (IABS) of integers are compiled in
++ *  line: a compare and a jump for each argument after the first, or for
++ *  the sign.  Each was a call with the arguments' addresses in a list.
++ *  Other arguments go to the library.
++ */
++static int minMaxId(char *name) {
++    if (strcasecmp(name, "MIN") == 0 || strcasecmp(name, "MIN0") == 0) return 1;
++    if (strcasecmp(name, "MAX") == 0 || strcasecmp(name, "MAX0") == 0) return 2;
++    if (strcasecmp(name, "ABS") == 0 || strcasecmp(name, "IABS") == 0) return 3;
++    return 0;
++}
++
++static bool isIntegerExpr(Token *t) {
++    char *name;
++    DataType *dt;
++    TokenListItem *q;
++    Symbol *symbol;
++
++    if (t == NULL) return FALSE;
++    switch (t->type) {
++    case TokenType_Constant:
++        return t->details.constant.dt.type == BaseType_Integer;
++    case TokenType_Identifier:
++        if (t->details.identifier.range != NULL) return FALSE;
++        name = t->details.identifier.name;
++        symbol = findSymbol(name);
++        if (t->details.identifier.qualifiers != NULL
++            && (symbol == NULL || (symbol->class == SymClass_Undefined && getSymbolType(symbol)->rank == 0))) {
++            if (bitFunctionId(name) != 0) return TRUE;
++            if (minMaxId(name) == 0) return FALSE;
++            for (q = t->details.identifier.qualifiers; q != NULL; q = q->next) {
++                if (q->item != NULL && !isIntegerExpr(q->item)) return FALSE;
++            }
++            return TRUE;
++        }
++        if (symbol == NULL) symbol = addSymbol(name, SymClass_Undefined);
++        if (symbol->class != SymClass_Undefined && symbol->class != SymClass_Auto
++            && symbol->class != SymClass_Static && symbol->class != SymClass_Adjustable
++            && symbol->class != SymClass_Global && symbol->class != SymClass_Argument
++            && symbol->class != SymClass_Parameter) return FALSE;
++        dt = getSymbolType(symbol);
++        if (dt->type != BaseType_Integer) return FALSE;
++        return (t->details.identifier.qualifiers == NULL) ? dt->rank == 0 : dt->rank > 0;
++    case TokenType_Operator:
++        switch (t->details.operator.id) {
++        case OP_ADD:
++        case OP_SUB:
++        case OP_MUL:
++        case OP_DIV:
++            return isIntegerExpr(t->details.operator.leftArg) && isIntegerExpr(t->details.operator.rightArg);
++        case OP_NEG:
++        case OP_PLUS:
++        case OP_SEXPR:
++            return isIntegerExpr(t->details.operator.rightArg);
++        default:
++            return FALSE;
++        }
++    default:
++        return FALSE;
++    }
++}
++
++static bool evaluateMinMax(Token *fn, int id) {
++    OperatorArgument acc;
++    OperatorArgument arg;
++    int count;
++    int n;
++    TokenListItem *qualifier;
++
++    count = 0;
++    for (qualifier = fn->details.identifier.qualifiers; qualifier != NULL; qualifier = qualifier->next) {
++        if (qualifier->item != NULL) count += 1;
++    }
++    if ((id == 3) ? count != 1 : count < 2) {
++        err("Wrong number of arguments to %s", fn->details.identifier.name);
++        return TRUE;
++    }
++    n = 0;
++    for (qualifier = fn->details.identifier.qualifiers; qualifier != NULL; qualifier = qualifier->next) {
++        if (qualifier->item == NULL) continue;
++        if (evaluateExpression(qualifier->item, &arg)) {
++            if (n > 0) freeRegister(acc.reg);
++            return TRUE;
++        }
++        loadValue(&arg);
++        if (n == 0) {
++            acc = arg;
++            if (id == 3) emitAbsInt(acc.reg);
++        }
++        else {
++            emitMinMaxInt(acc.reg, arg.reg, id == 2);
++            freeRegister(arg.reg);
++        }
++        n += 1;
++    }
++    acc.class = ArgClass_Calculation;
++    acc.details.calculation.type = BaseType_Integer;
++    acc.details.calculation.rank = 0;
++    pushArg(&acc);
++
++    return FALSE;
 +}
 +
 +static bool evaluateBitFunction(Token *fn, int id) {
@@ -449,7 +624,7 @@ index c7dec54..e86f42b 100644
  static bool evaluateExpression(Token *expression, OperatorArgument *result) {
      int curOpStkBtm;
      int argStkBtm;
-@@ -1145,6 +1244,21 @@ static bool evaluateFmtSpec(ControlInfoList *ciList) {
+@@ -1145,6 +1354,21 @@ static bool evaluateFmtSpec(ControlInfoList *ciList) {
          freeRegister(result.reg);
          formatter = "@_prsfmt";
      }
@@ -471,7 +646,7 @@ index c7dec54..e86f42b 100644
      else {
          err("Format specification is not character type or FORMAT label");
          if (isCalculation(result)) freeRegister(result.reg);
-@@ -1159,6 +1273,7 @@ static bool evaluateFmtSpec(ControlInfoList *ciList) {
+@@ -1159,6 +1383,7 @@ static bool evaluateFmtSpec(ControlInfoList *ciList) {
  static bool evaluateFunction(Token *fn, Symbol *symbol, Symbol *intrinsic) {
      DataType *dt;
      int frameSize;
@@ -479,7 +654,7 @@ index c7dec54..e86f42b 100644
      int n;
      int parmIdx;
      int pass;
-@@ -1173,6 +1288,7 @@ static bool evaluateFunction(Token *fn, Symbol *symbol, Symbol *intrinsic) {
+@@ -1173,6 +1398,7 @@ static bool evaluateFunction(Token *fn, Symbol *symbol, Symbol *intrinsic) {
      emitSaveRegs(registerMap);
      enableEmission(FALSE);
      varArgIncr = 0;
@@ -487,7 +662,7 @@ index c7dec54..e86f42b 100644
      if (intrinsic != NULL) {
          intrinsic = matchIntrinsic(fn, intrinsic);
          if (intrinsic == NULL) {
-@@ -1216,7 +1332,10 @@ static bool evaluateFunction(Token *fn, Symbol *symbol, Symbol *intrinsic) {
+@@ -1216,7 +1442,10 @@ static bool evaluateFunction(Token *fn, Symbol *symbol, Symbol *intrinsic) {
                          frameSize += 1;
                      }
                      else {
@@ -499,7 +674,7 @@ index c7dec54..e86f42b 100644
                          freeCharValue(&result.details.constant.value);
                          emitStoreStack(result.reg, parmIdx);
                          freeRegister(result.reg);
-@@ -1318,6 +1437,10 @@ static bool evaluateIdentifier(Token *id) {
+@@ -1318,6 +1547,15 @@ static bool evaluateIdentifier(Token *id) {
  
      name = id->details.identifier.name;
      symbol = findSymbol(name);
@@ -507,10 +682,15 @@ index c7dec54..e86f42b 100644
 +        && (symbol == NULL || (symbol->class == SymClass_Undefined && getSymbolType(symbol)->rank == 0))) {
 +        return evaluateBitFunction(id, bitFunctionId(name));
 +    }
++    if (id->details.identifier.qualifiers != NULL && minMaxId(name) != 0
++        && (symbol == NULL || (symbol->class == SymClass_Undefined && getSymbolType(symbol)->rank == 0))
++        && isIntegerExpr(id)) {
++        return evaluateMinMax(id, minMaxId(name));
++    }
      if (symbol == NULL) {
          symbol = addSymbol(name, SymClass_Undefined);
      }
-@@ -1901,6 +2024,10 @@ static bool executeOperator(OperatorId op) {
+@@ -1901,6 +2139,10 @@ static bool executeOperator(OperatorId op) {
          if (isLoadable(leftArg)) loadValue(&leftArg);
          if (leftType  != argType) leftType  = coerceArgument(&leftArg,  leftType,  argType);
          if (rightType != argType) rightType = coerceArgument(&rightArg, rightType, argType);
@@ -521,7 +701,15 @@ index c7dec54..e86f42b 100644
          if (!isConstResult) {
              if (isConstant(leftArg)) {
                  emitLoadConst(&leftArg);
-@@ -2405,6 +2532,22 @@ static void inputFini(ControlInfoList *ciList) {
+@@ -2401,10 +2643,29 @@ static void inputCheckIostat(ControlInfoList *ciList) {
+ }
+ 
+ static void inputFini(ControlInfoList *ciList) {
+-    if (ciList->format != NULL) emitPrimCall("@_endfmt");
++    if (ciList->format != NULL) {
++        if (ciList->unitType != BaseType_Character) emitPrimCall("@_rdufin");
++        emitPrimCall("@_endfmt");
++    }
      emitAdjustSP(2);
  }
  
@@ -544,7 +732,7 @@ index c7dec54..e86f42b 100644
  static void inputInit(ControlInfoList *ciList) {
      DataType *dt;
      OperatorArgument unit;
-@@ -2416,6 +2559,7 @@ static void inputInit(ControlInfoList *ciList) {
+@@ -2416,6 +2677,7 @@ static void inputInit(ControlInfoList *ciList) {
      freeRegister(unit.reg);
      dt = getDataType(&unit);
      ciList->unitType = dt->type;
@@ -552,7 +740,7 @@ index c7dec54..e86f42b 100644
      if (ciList->unitType == BaseType_Character) {
          emitPrimCall("@_setrcd");
      }
-@@ -2741,6 +2885,7 @@ static void outputInit(ControlInfoList *ciList) {
+@@ -2741,6 +3003,7 @@ static void outputInit(ControlInfoList *ciList) {
      freeRegister(unit.reg);
      dt = getDataType(&unit);
      ciList->unitType = dt->type;
@@ -560,7 +748,7 @@ index c7dec54..e86f42b 100644
      if (ciList->unitType == BaseType_Character) {
          emitPrimCall("@_setrcd");
          emitPrimCall("@_inircd");
-@@ -2753,6 +2898,7 @@ static void outputInit(ControlInfoList *ciList) {
+@@ -2753,6 +3016,7 @@ static void outputInit(ControlInfoList *ciList) {
  static char *parseActualArguments(char *s, int *frameSize) {
      DataType *dt;
      Token *expression;
@@ -568,7 +756,7 @@ index c7dec54..e86f42b 100644
      int parmIdx;
      int pass;
      Register reg;
-@@ -2762,6 +2908,7 @@ static char *parseActualArguments(char *s, int *frameSize) {
+@@ -2762,6 +3026,7 @@ static char *parseActualArguments(char *s, int *frameSize) {
  
      *frameSize = 0;
      tempIdx = 0;
@@ -576,7 +764,7 @@ index c7dec54..e86f42b 100644
      start = eatWsp(s + 1);
      if (*start == ')') return start + 1;
      enableEmission(FALSE);
-@@ -2787,7 +2934,10 @@ static char *parseActualArguments(char *s, int *frameSize) {
+@@ -2787,7 +3052,10 @@ static char *parseActualArguments(char *s, int *frameSize) {
                              *frameSize += 1;
                          }
                          else {
@@ -588,7 +776,15 @@ index c7dec54..e86f42b 100644
                              freeCharValue(&result.details.constant.value);
                              emitStoreStack(result.reg, parmIdx);
                              freeRegister(result.reg);
-@@ -5162,7 +5312,8 @@ static void parseASSIGN(char *s) {
+@@ -4480,6 +4748,7 @@ static void parseLogicalIF(char *s, Register reg, bool isFromLogIf) {
+                 parseASSIGN(s);
+                 break;
+             case BACKSPACE:
++                parseBACKSPACE(s);
+                 break;
+             case CALL:
+                 parseCALL(s);
+@@ -5162,7 +5431,8 @@ static void parseASSIGN(char *s) {
      }
      labelSym = findLabel(lineLabel);
      if (labelSym != NULL) {
@@ -598,7 +794,7 @@ index c7dec54..e86f42b 100644
              err("Label does not reference executable or FORMAT statement");
              return;
          }
-@@ -5261,6 +5412,16 @@ static void parseCALL(char *s) {
+@@ -5261,6 +5531,16 @@ static void parseCALL(char *s) {
      }
      strcpy(name, token.details.identifier.name);
      sym = findSymbol(name);
@@ -615,7 +811,7 @@ index c7dec54..e86f42b 100644
      if (sym == NULL) {
          sym = addSymbol(name, SymClass_Subroutine);
      }
-@@ -5271,7 +5432,9 @@ static void parseCALL(char *s) {
+@@ -5271,7 +5551,9 @@ static void parseCALL(char *s) {
      frameSize = 0;
      s = eatWsp(s);
      if (*s == '(') {
@@ -625,7 +821,7 @@ index c7dec54..e86f42b 100644
          s = eatWsp(s);
      }
      if (*s != '\0') {
-@@ -6528,12 +6691,15 @@ static void parseOutputStmt(char *s, int unitNum) {
+@@ -6528,12 +6810,15 @@ static void parseOutputStmt(char *s, int unitNum) {
          return;
      }
      s = eatWsp(s);
@@ -643,7 +839,7 @@ index c7dec54..e86f42b 100644
      if (s != NULL) {
          ciList->unit = createIntegerConstant(unitNum);
          outputInit(ciList);
-@@ -6896,12 +7062,14 @@ static void parseREAD(char *s) {
+@@ -6896,12 +7181,14 @@ static void parseREAD(char *s) {
              return;
          }
          s = eatWsp(s);
@@ -660,7 +856,7 @@ index c7dec54..e86f42b 100644
          ciList->unit = createIntegerConstant(DEFAULT_INPUT_UNIT);
      }
      s = parseIoList(s, FALSE, &ioList);
-@@ -6921,7 +7089,27 @@ static void parseRETURN(char *s) {
+@@ -6921,12 +7208,40 @@ static void parseRETURN(char *s) {
      }
      s = eatWsp(s);
      if (*s != '\0') {
@@ -689,7 +885,29 @@ index c7dec54..e86f42b 100644
      }
      emitBranch(progUnitSym->details.progUnit.exitLabel);
  }
-@@ -7831,6 +8019,12 @@ static bool validateDataInitializer(StorageReference *ref, ConstantListItem *con
+ 
++static void parseBACKSPACE(char *s) {
++    parsePositioning(s, "@_bkspu");
++}
++
+ static void parseREWIND(char *s) {
++    parsePositioning(s, "@_rewndu");
++}
++
++static void parsePositioning(char *s, char *routine) {
+     OperatorArgument arg;
+     DataType *dt;
+     int ec;
+@@ -6974,7 +7289,7 @@ static void parseREWIND(char *s) {
+         freeFileInfoList(ciList);
+         return;
+     }
+-    emitPrimCall("@_rewndu");
++    emitPrimCall(routine);
+     emitPrimCall("@_iostat");
+     emitAdjustSP(1);
+     reg = RESULT_REG;
+@@ -7831,6 +8146,12 @@ static bool validateDataInitializer(StorageReference *ref, ConstantListItem *con
      }
      enableEmission(FALSE);
      ec = errorCount;
@@ -702,7 +920,7 @@ index c7dec54..e86f42b 100644
      dt = getSymbolType(symbol);
      type = dt->type;
      rank = symbol->details.variable.dt.rank;
-@@ -7949,6 +8143,15 @@ static bool validateDataInitializer(StorageReference *ref, ConstantListItem *con
+@@ -7949,6 +8270,15 @@ static bool validateDataInitializer(StorageReference *ref, ConstantListItem *con
                      cListItem->details.value.integer = (i64)cListItem->details.value.real;
                      break;
                  case BaseType_Character:
@@ -758,6 +976,447 @@ index 25ee7bd..5027c74 100644
 +    /* the second argument is an integer: taken as a real, its test raises a floating point error */
 +    return (*((long *)(waddrb << 3)) >= 0) ? _iabs(waddra) : -(_iabs(waddra));
  }
+diff --git a/fortran/jumps.c b/fortran/jumps.c
+new file mode 100644
+index 0000000..ad370a4
+--- /dev/null
++++ b/fortran/jumps.c
+@@ -0,0 +1,435 @@
++/*--------------------------------------------------------------------------
++**
++**  Name: jumps.c
++**
++**  Description:
++**      Conditions compiled to jumps.
++**
++**      A relation is compiled as a value, all ones if it holds and zero if
++**      not, made with a jump:
++**
++**               S0        X              the relation
++**               Sr        <64
++**               Jc        *+3            Jc: JSZ, JSN, JSP or JSM
++**               Sr        0
++**
++**      .AND., .OR. and .NOT. combine such values (Sd Sa&Sb, Sd Sa!Sb,
++**      Sd #Sa), and an IF tests the result with S0 Sr and JSZ to the code
++**      that follows when the condition is false.  This pass reads the
++**      compiled program back and, where a block of code ends in such a
++**      test, compiles its condition as jumps instead: each relation is
++**      S0 X and one jump, .AND. jumps to the false label as soon as one
++**      relation fails, .OR. jumps past the rest as soon as one holds.
++**
++**      The code that loads the operands of a relation stays in front of
++**      it.  A relation after the first may be skipped, so its code must
++**      only set registers and read only what it has set itself, besides
++**      the stack and frame registers (A5, A6, A7).  A block that does not
++**      have exactly this form is left as it is.
++**
++**--------------------------------------------------------------------------
++*/
++
++#include <ctype.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include "proto.h"
++
++#define MAX_FIELD  24
++#define MAX_NODES  128
++
++typedef struct line {
++    char *text;
++    char label[MAX_FIELD];  /* longer ones are taken for labels of their own */
++    char f1[MAX_FIELD];
++    char *f2;               /* the operand field, within text */
++    int  isComment;
++} Line;
++
++typedef enum { Node_Leaf, Node_And, Node_Or, Node_Not } NodeKind;
++
++typedef struct node {
++    NodeKind kind;
++    int a, b;          /* operands of And, Or, Not            */
++    int codeFirst;     /* leaf: the lines that load operands  */
++    int codeCount;
++    int test;          /* leaf: the line S0 X                 */
++    char cond[4];      /* leaf: the jump taken if it holds    */
++} Node;
++
++static Line   *lines;
++static int     lineCount;
++static FILE   *out;
++static int     labelCounter = 0;
++
++static Node    nodes[MAX_NODES];
++static int     nodeCount;
++static Line   *region;
++
++static char *copyField(char *dp, char *cp) {
++    int n;
++
++    n = 0;
++    while (*cp != '\0' && *cp != ' ' && *cp != '\t') {
++        if (n < MAX_FIELD - 1) dp[n++] = *cp;
++        else dp[0] = '?';            /* too long to be what is looked for */
++        cp += 1;
++    }
++    dp[n] = '\0';
++    return cp;
++}
++
++static void parseLine(Line *lp, char *text) {
++    char *cp;
++    char *ep;
++
++    lp->text = text;
++    lp->label[0] = lp->f1[0] = '\0';
++    lp->f2 = "";
++    lp->isComment = (*text == '*' || *text == '\0');
++    if (lp->isComment) return;
++    ep = text + strlen(text);
++    while (ep > text && (ep[-1] == ' ' || ep[-1] == '\t' || ep[-1] == '\r')) *--ep = '\0';
++    cp = text;
++    if (*cp != ' ' && *cp != '\t') {
++        cp = copyField(lp->label, cp);
++        if (lp->label[0] == '\0') lp->label[0] = '?';
++    }
++    while (*cp == ' ' || *cp == '\t') cp += 1;
++    cp = copyField(lp->f1, cp);
++    while (*cp == ' ' || *cp == '\t') cp += 1;
++    lp->f2 = cp;
++}
++
++/* Sn or An, n from lo to 7 */
++static int isReg(char *s, char kind, int lo) {
++    return s[0] == kind && s[1] >= '0' + lo && s[1] <= '7' && s[2] == '\0';
++}
++
++static int isJump(char *f1) {
++    return strcmp(f1, "JSZ") == 0 || strcmp(f1, "JSN") == 0
++        || strcmp(f1, "JSP") == 0 || strcmp(f1, "JSM") == 0;
++}
++
++static char *negation(char *cond) {
++    if (strcmp(cond, "JSZ") == 0) return "JSN";
++    if (strcmp(cond, "JSN") == 0) return "JSZ";
++    if (strcmp(cond, "JSP") == 0) return "JSM";
++    return "JSP";
++}
++
++/* a line that is code with no label, as opposed to a jump, a call, a label or a directive */
++static int isCode(Line *lp) {
++    char *f1;
++
++    if (lp->isComment || lp->label[0] != '\0') return 0;
++    f1 = lp->f1;
++    if (strchr(f1, ',') != NULL) return 1;              /* a store */
++    if (strcmp(f1, "VL") == 0 || strcmp(f1, "VM") == 0) return 1;
++    if ((f1[0] == 'S' || f1[0] == 'A' || f1[0] == 'B' || f1[0] == 'T' || f1[0] == 'V')
++        && f1[1] >= '0' && f1[1] <= '7') return 1;
++    return 0;
++}
++
++/* a line that sets a register (S1-S7, A1-A7) and does nothing else */
++static int isPlain(Line *lp) {
++    return lp->label[0] == '\0' && (isReg(lp->f1, 'S', 1) || isReg(lp->f1, 'A', 1));
++}
++
++/* the registers S1-S7 and A1-A7 an operand field reads, as a bit mask */
++static int regsRead(char *s) {
++    int mask;
++    char *cp;
++
++    mask = 0;
++    for (cp = s; *cp != '\0'; cp++) {
++        if ((*cp == 'S' || *cp == 'A') && cp[1] >= '0' && cp[1] <= '7'
++            && (cp == s || !isalnum((unsigned char)cp[-1]))
++            && !isalnum((unsigned char)cp[2])) {
++            mask |= 1 << (((*cp == 'S') ? 0 : 8) + cp[1] - '0');
++        }
++    }
++    return mask;
++}
++
++static int regBit(char *r) {
++    return 1 << (((r[0] == 'S') ? 0 : 8) + r[1] - '0');
++}
++
++static int isMaterialization(Line *lp) {
++    return lp[0].label[0] == '\0' && strcmp(lp[0].f1, "S0") == 0
++        && isReg(lp[1].f1, 'S', 1) && lp[1].label[0] == '\0' && strcmp(lp[1].f2, "<64") == 0
++        && isJump(lp[2].f1) && lp[2].label[0] == '\0' && strcmp(lp[2].f2, "*+3") == 0
++        && strcmp(lp[3].f1, lp[1].f1) == 0 && lp[3].label[0] == '\0' && strcmp(lp[3].f2, "0") == 0;
++}
++
++/* the code of a leaf after the first reads only what it sets itself */
++static int isSelfContained(Node *np) {
++    int i;
++    int written;
++
++    written = regBit("A5") | regBit("A6") | regBit("A7");
++    for (i = np->codeFirst; i < np->codeFirst + np->codeCount; i++) {
++        if ((regsRead(region[i].f2) & ~written) != 0) return 0;
++        written |= regBit(region[i].f1);
++    }
++    return (regsRead(region[np->test].f2) & ~written) == 0;
++}
++
++static void putLine(char *label, char *f1, char *f2) {
++    fprintf(out, "%-8s %-9s %s\n", label, f1, f2);
++}
++
++static void newLabel(char *label) {
++    sprintf(label, "%%P%05d", ++labelCounter);
++}
++
++static void genTrue(int n, char *t);
++
++static void genLeaf(Node *np, char *jump, char *target) {
++    int i;
++
++    for (i = np->codeFirst; i < np->codeFirst + np->codeCount; i++) fprintf(out, "%s\n", region[i].text);
++    putLine("", "S0", region[np->test].f2);
++    putLine("", jump, target);
++}
++
++static void genFalse(int n, char *f) {
++    char label[16];
++    Node *np;
++
++    np = &nodes[n];
++    switch (np->kind) {
++    case Node_Leaf:
++        genLeaf(np, negation(np->cond), f);
++        break;
++    case Node_And:
++        genFalse(np->a, f);
++        genFalse(np->b, f);
++        break;
++    case Node_Or:
++        newLabel(label);
++        genTrue(np->a, label);
++        genFalse(np->b, f);
++        putLine(label, "=", "*");
++        break;
++    case Node_Not:
++        genTrue(np->a, f);
++        break;
++    }
++}
++
++static void genTrue(int n, char *t) {
++    char label[16];
++    Node *np;
++
++    np = &nodes[n];
++    switch (np->kind) {
++    case Node_Leaf:
++        genLeaf(np, np->cond, t);
++        break;
++    case Node_Or:
++        genTrue(np->a, t);
++        genTrue(np->b, t);
++        break;
++    case Node_And:
++        newLabel(label);
++        genFalse(np->a, label);
++        genTrue(np->b, t);
++        putLine(label, "=", "*");
++        break;
++    case Node_Not:
++        genFalse(np->a, t);
++        break;
++    }
++}
++
++static int isLaterLeafOk(int n, int *first) {
++    Node *np;
++
++    np = &nodes[n];
++    if (np->kind != Node_Leaf) {
++        if (!isLaterLeafOk(np->a, first)) return 0;
++        return np->kind == Node_Not || isLaterLeafOk(np->b, first);
++    }
++    if (*first) {
++        *first = 0;
++        return np->codeFirst == 0;   /* the relation that always runs */
++    }
++    return isSelfContained(np);
++}
++
++/*
++ *  Rewrite a block of count lines that ends in S0 Sr and JSZ.  Returns 1
++ *  if it was written out as jumps, 0 if it is to be copied as it is.
++ */
++static int rewrite(Line *lp, int count) {
++    char *bodyLabel;
++    int bodyCount;
++    int codeFirst;
++    int first;
++    int i;
++    int live;
++    int r;
++    int regNodes[8];
++    Node *np;
++
++    region = lp;
++    bodyCount = count - 2;
++    if (!isReg(lp[bodyCount].f2, 'S', 1) || lp[bodyCount].label[0] != '\0' || lp[bodyCount + 1].label[0] != '\0') return 0;
++    for (i = 0; i < 8; i++) regNodes[i] = -1;
++    nodeCount = 0;
++    codeFirst = 0;
++    first = 1;
++    i = 0;
++    while (i < bodyCount) {
++        if (i + 3 < bodyCount && isMaterialization(&lp[i])) {
++            if (nodeCount >= MAX_NODES) return 0;
++            np = &nodes[nodeCount];
++            np->kind = Node_Leaf;
++            np->codeFirst = codeFirst;
++            np->codeCount = i - codeFirst;
++            np->test = i;
++            strcpy(np->cond, lp[i + 2].f1);
++            r = lp[i + 1].f1[1] - '0';
++            if (regNodes[r] != -1) return 0;
++            regNodes[r] = nodeCount++;
++            i += 4;
++            codeFirst = i;
++            first = 0;
++            continue;
++        }
++        if (!first && codeFirst == i && isReg(lp[i].f1, 'S', 1) && lp[i].label[0] == '\0') {
++            char *f2 = lp[i].f2;
++            int a, b;
++            NodeKind kind;
++
++            kind = Node_Leaf;
++            if (f2[0] == 'S' && f2[3] == 'S' && (f2[2] == '&' || f2[2] == '!') && f2[5] == '\0') {
++                a = f2[1] - '0';
++                b = f2[4] - '0';
++                if (a >= 1 && a <= 7 && b >= 1 && b <= 7 && a != b && regNodes[a] != -1 && regNodes[b] != -1) {
++                    kind = (f2[2] == '&') ? Node_And : Node_Or;
++                }
++            }
++            else if (f2[0] == '#' && f2[1] == 'S' && f2[3] == '\0') {
++                a = f2[2] - '0';
++                b = -1;
++                if (a >= 1 && a <= 7 && regNodes[a] != -1) kind = Node_Not;
++            }
++            if (kind != Node_Leaf) {
++                if (nodeCount >= MAX_NODES) return 0;
++                np = &nodes[nodeCount];
++                np->kind = kind;
++                np->a = regNodes[a];
++                np->b = (b > 0) ? regNodes[b] : -1;
++                regNodes[a] = -1;
++                if (b > 0) regNodes[b] = -1;
++                r = lp[i].f1[1] - '0';
++                if (regNodes[r] != -1) return 0;
++                regNodes[r] = nodeCount++;
++                i += 1;
++                codeFirst = i;
++                continue;
++            }
++        }
++        if (!first) {
++            if (!isPlain(&lp[i])) return 0;
++            r = lp[i].f1[1] - '0';
++            if (lp[i].f1[0] == 'S' && regNodes[r] != -1) return 0;
++        }
++        i += 1;
++    }
++    if (first || codeFirst != bodyCount) return 0;
++    r = lp[bodyCount].f2[1] - '0';
++    live = 0;
++    for (i = 1; i < 8; i++) {
++        if (regNodes[i] != -1) live += 1;
++    }
++    if (live != 1 || regNodes[r] == -1) return 0;
++    first = 1;
++    if (!isLaterLeafOk(regNodes[r], &first)) return 0;
++    bodyLabel = lp[bodyCount + 1].f2;
++    genFalse(regNodes[r], bodyLabel);
++    return 1;
++}
++
++static void copyLines(int first, int last) {
++    int i;
++
++    for (i = first; i < last; i++) fprintf(out, "%s\n", lines[i].text);
++}
++
++/*
++ *  Rewrite the compiled program in path.
++ */
++static char *readLine(FILE *in) {
++    int c;
++    char *buf;
++    int len;
++    int size;
++
++    size = 128;
++    buf = (char *)malloc(size);
++    len = 0;
++    while (buf != NULL && (c = getc(in)) != EOF && c != '\n') {
++        if (len + 1 >= size) {
++            size *= 2;
++            buf = (char *)realloc(buf, size);
++            if (buf == NULL) return NULL;
++        }
++        buf[len++] = c;
++    }
++    if (buf == NULL) return NULL;
++    if (c == EOF && len == 0) {
++        free(buf);
++        return NULL;
++    }
++    buf[len] = '\0';
++    return buf;
++}
++
++void compileConditionsToJumps(char *path) {
++    char *cp;
++    FILE *in;
++    int i;
++    int limit;
++    int start;
++
++    in = fopen(path, "r");
++    if (in == NULL) return;
++    limit = 1024;
++    lines = (Line *)malloc(limit * sizeof(Line));
++    lineCount = 0;
++    while (lines != NULL && (cp = readLine(in)) != NULL) {
++        if (lineCount >= limit) {
++            limit *= 2;
++            lines = (Line *)realloc(lines, limit * sizeof(Line));
++            if (lines == NULL) break;
++        }
++        parseLine(&lines[lineCount++], cp);
++    }
++    fclose(in);
++    if (lines == NULL) return;   /* out of memory: the program stays as it is */
++
++    out = fopen(path, "w");
++    if (out == NULL) return;
++    start = 0;
++    for (i = 0; i < lineCount; i++) {
++        Line *lp = &lines[i];
++        if (!lp->isComment && lp->label[0] == '\0' && strcmp(lp->f1, "JSZ") == 0
++            && i > start && strcmp(lines[i - 1].f1, "S0") == 0) {
++            if (!rewrite(&lines[start], i + 1 - start)) copyLines(start, i + 1);
++            start = i + 1;
++        }
++        else if (!isCode(lp) && !(isJump(lp->f1) && strcmp(lp->f2, "*+3") == 0 && lp->label[0] == '\0')) {
++            copyLines(start, i + 1);
++            start = i + 1;
++        }
++    }
++    copyLines(start, lineCount);
++    fclose(out);
++    for (i = 0; i < lineCount; i++) free(lines[i].text);
++    free(lines);
++}
 diff --git a/fortran/lex.c b/fortran/lex.c
 index 751d455..f107797 100644
 --- a/fortran/lex.c
@@ -772,10 +1431,30 @@ index 751d455..f107797 100644
      memset(token, 0, sizeof(Token));
      s = getNextChar(s);
 diff --git a/fortran/main.c b/fortran/main.c
-index d7fe044..0f940d5 100644
+index d7fe044..092411b 100644
 --- a/fortran/main.c
 +++ b/fortran/main.c
-@@ -81,6 +81,7 @@ int main(int argc, char *argv[]) {
+@@ -33,6 +33,9 @@
+ static char *parseOptions(int argc, char *argv[]);
+ static void usage(void);
+ 
++/* the file the program is compiled to, to be read back by the pass of jumps.c */
++static char *outputPath = NULL;
++
+ int main(int argc, char *argv[]) {
+     char *cp;
+     char *dp;
+@@ -70,6 +73,9 @@ int main(int argc, char *argv[]) {
+     compile(name);
+ 
+     if (objectFile != NULL) fclose(objectFile);
++#if !defined(__cos)
++    if (outputPath != NULL && strcmp(outputPath, "0") != 0 && errorCount == 0) compileConditionsToJumps(outputPath);
++#endif
+ 
+     exit(0);
+ }
+@@ -81,6 +87,7 @@ int main(int argc, char *argv[]) {
  #define L_KEY "L="
  #define O_KEY "O="
  #define S_KEY "S"
@@ -783,7 +1462,7 @@ index d7fe044..0f940d5 100644
  #define W_KEY "W"
  #define STDIN  "$IN"
  #define STDOUT "$OUT"
-@@ -90,6 +91,7 @@ int main(int argc, char *argv[]) {
+@@ -90,6 +97,7 @@ int main(int argc, char *argv[]) {
  #define L_KEY "-l"
  #define O_KEY "-o"
  #define S_KEY "-s"
@@ -791,7 +1470,15 @@ index d7fe044..0f940d5 100644
  #define W_KEY "-w"
  #define STDIN  "-"
  #define STDOUT "-"
-@@ -183,6 +185,9 @@ static char *parseOptions(int argc, char *argv[]) {
+@@ -166,6 +174,7 @@ static char *parseOptions(int argc, char *argv[]) {
+                 usage();
+             }
+             objectPath = argv[i];
++            outputPath = objectPath;
+             if (strcmp(objectPath, "0") == 0) {
+                 objectFile = NULL;
+             }
+@@ -183,6 +192,9 @@ static char *parseOptions(int argc, char *argv[]) {
          else if (strcmp(argv[i], W_KEY) == 0) {
              doSuppressWarnings = TRUE;
          }
@@ -801,7 +1488,7 @@ index d7fe044..0f940d5 100644
  #if defined(__cos)
          else {
              usage();
-@@ -218,7 +223,7 @@ static char *parseOptions(int argc, char *argv[]) {
+@@ -218,7 +230,7 @@ static char *parseOptions(int argc, char *argv[]) {
  
  static void usage(void) {
  #if defined(__cos)
@@ -810,7 +1497,7 @@ index d7fe044..0f940d5 100644
      fputs("  ALLOC=key - variable storage allocation strategy\n", stderr);
      fputs("              STATIC : variables are allocated in static storage\n", stderr);
      fputs("              STACK or AUTO : variables are allocated on the runtime stack\n", stderr);
-@@ -227,7 +232,7 @@ static void usage(void) {
+@@ -227,7 +239,7 @@ static void usage(void) {
      fputs("  O=ofile   - output file (default ZZZZCAL)\n", stderr);
      fputs("  S         - echo source code lines to output file\n", stderr);
  #else
@@ -820,7 +1507,7 @@ index d7fe044..0f940d5 100644
      fputs("              static : variables are allocated in static storage\n", stderr);
      fputs("              stack or auto : variables are allocated on the runtime stack\n", stderr);
 diff --git a/fortran/proto.h b/fortran/proto.h
-index fead8a4..a05804c 100644
+index fead8a4..4129264 100644
 --- a/fortran/proto.h
 +++ b/fortran/proto.h
 @@ -77,6 +77,7 @@ extern int autoOffset;
@@ -831,6 +1518,13 @@ index fead8a4..a05804c 100644
  extern bool doList;
  extern bool doStaticLocals;
  extern bool doStaticLocalsDefault;
+@@ -95,4 +96,6 @@ extern Symbol *symbols;
+ extern int totalErrors;
+ extern int warningCount;
+ 
++void compileConditionsToJumps(char *path);
++
+ #endif
 diff --git a/fortran/runtime/const.h b/fortran/runtime/const.h
 index dc50566..35f3359 100644
 --- a/fortran/runtime/const.h
@@ -845,10 +1539,77 @@ index dc50566..35f3359 100644
  #define MAX_FMT_RECL        152
  #define MAX_UNIT_NUMBER     102
 diff --git a/fortran/runtime/fmt.c b/fortran/runtime/fmt.c
-index d889017..ac4ae2d 100644
+index d889017..60c3b4f 100644
 --- a/fortran/runtime/fmt.c
 +++ b/fortran/runtime/fmt.c
-@@ -145,9 +145,12 @@ void _inpdbl(int unitNum, f64 *value) {
+@@ -98,6 +98,66 @@ void _endfmt(void) {
+     endfmtHelper(firstDesc);
+ }
+ 
++/*
++ *  The unit a formatted READ reads, for a slash in its format, which goes
++ *  on to the unit's next record; 0 while none is being read.
++ */
++int _inpUnit = 0;
++
++extern void _rdurec(int unitNum);
++
++static void nextInputRecord(void) {
++    if (_inpUnit > 0) _rdurec(_inpUnit);
++    cursor = currentRecord;
++}
++
++/*
++ *  _inpend - the end of a formatted READ's list: the format is followed up
++ *  to its next data descriptor, a colon or its end, and a slash on the way
++ *  reads a record, as the standard has it (READ (2,'(I5/)') N reads two).
++ */
++void _inpend(void) {
++    if (nextDesc == NULL) return;
++    for (;;) {
++        if (++nextDesc->currentIteration > nextDesc->repeatCount) {
++            if (nextDesc->sibling != NULL) {
++                nextDesc = nextDesc->sibling;
++            }
++            else if (nextDesc->parent != NULL) {
++                nextDesc = nextDesc->parent;
++            }
++            else {
++                return;
++            }
++            continue;
++        }
++        switch (nextDesc->class) {
++        case Fmt_EOR:
++            nextInputRecord();
++            break;
++        case Fmt_Embedded:
++            nextDesc = nextDesc->child;
++            resetIterations(nextDesc);
++            break;
++        case Fmt_A:
++        case Fmt_B:
++        case Fmt_D:
++        case Fmt_E:
++        case Fmt_F:
++        case Fmt_G:
++        case Fmt_I:
++        case Fmt_L:
++        case Fmt_O:
++        case Fmt_R:
++        case Fmt_Z:
++        case Fmt_Term:
++            return;
++        default:
++            break;
++        }
++    }
++}
++
+ void _inircd(void) {
+     memset(currentRecord, ' ', limit - currentRecord);
+     cursor = currentRecord;
+@@ -145,9 +205,12 @@ void _inpdbl(int unitNum, f64 *value) {
  }
  
  void _inpfmt(void *value) {
@@ -861,7 +1622,7 @@ index d889017..ac4ae2d 100644
      char *s;
      u64 word;
  
-@@ -173,24 +176,19 @@ void _inpfmt(void *value) {
+@@ -173,24 +236,19 @@ void _inpfmt(void *value) {
              s = (char *)(charRef & 0xffffffff);
              len = charRef >> 32;
              if (len == 0) { // value is not type CHARACTER
@@ -897,6 +1658,32 @@ index d889017..ac4ae2d 100644
              }
              else {
                  fieldWidth = (nextDesc->width == 0) ? len : nextDesc->width;
+@@ -297,9 +355,11 @@ void _inpfmt(void *value) {
+         case Fmt_SP:
+         case Fmt_String:
+         case Fmt_Term:
+-        case Fmt_EOR:
+             /* do nothing */
+             break;
++        case Fmt_EOR:
++            nextInputRecord();
++            break;
+         default:
+             break;
+         }
+diff --git a/fortran/runtime/fmt.h b/fortran/runtime/fmt.h
+index ed33148..3dd40c1 100644
+--- a/fortran/runtime/fmt.h
++++ b/fortran/runtime/fmt.h
+@@ -71,6 +71,8 @@ typedef struct formatDesc {
+ 
+ void _endfmt(void);
+ void _inpfmt(void *value);
++void _inpend(void);
++extern int _inpUnit;
+ FormatDesc *_getfdl(void);
+ unsigned long _getrcd(void);
+ void _inircd(void);
 diff --git a/fortran/runtime/fmt2.c b/fortran/runtime/fmt2.c
 index 02ce009..97a2729 100644
 --- a/fortran/runtime/fmt2.c
@@ -948,7 +1735,7 @@ index 02ce009..97a2729 100644
  
      _przfmt(fmtBuf);
 diff --git a/fortran/runtime/units.c b/fortran/runtime/units.c
-index 57f3ac0..637d675 100644
+index 57f3ac0..81e0742 100644
 --- a/fortran/runtime/units.c
 +++ b/fortran/runtime/units.c
 @@ -39,6 +39,13 @@ static char unitName[8] = {'U','N','I','T','0','0','0',0};
@@ -965,7 +1752,15 @@ index 57f3ac0..637d675 100644
  static void copyStrToRef(char *s1, ulong ref);
  static Unit *getUnit(int unitNum, int flags, int recLen);
  static int openUnit(char *fileName, int unitNum, int flags, int recLen);
-@@ -109,6 +116,8 @@ void _endfio(void) {
+@@ -47,6 +54,7 @@ static int trim(char *s, int len);
+ static int writer(Unit *up, void *buf, size_t nbyte);
+ 
+ extern int _exists(char *path);
++extern int _reopen(int fd);
+ 
+ Unit *_allocu(int unitNum) {
+     Unit *up;
+@@ -109,6 +117,8 @@ void _endfio(void) {
      }
  }
  
@@ -974,7 +1769,7 @@ index 57f3ac0..637d675 100644
  Unit *_findu(int unitNum) {
      int i;
      Unit *up;
-@@ -120,9 +129,14 @@ Unit *_findu(int unitNum) {
+@@ -120,9 +130,14 @@ Unit *_findu(int unitNum) {
          }
      }
      else {
@@ -990,7 +1785,7 @@ index 57f3ac0..637d675 100644
          }
      }
      return NULL;
-@@ -141,6 +155,7 @@ void _flufmt(int unitNum) {
+@@ -141,6 +156,7 @@ void _flufmt(int unitNum) {
          ref = _getrcd();
          refToCharPtr(ref, &s, &len);
          if (writer(up, s, len) != len || eor == 0) break;
@@ -998,7 +1793,7 @@ index 57f3ac0..637d675 100644
      }
  }
  
-@@ -174,6 +189,10 @@ void _inbchr(int unitNum, unsigned long ref) {
+@@ -174,6 +190,10 @@ void _inbchr(int unitNum, unsigned long ref) {
      if (up->ioStat != 0) return;
      s = (char *)(ref & 0xffffffff);
      len = ref >> 32;
@@ -1009,7 +1804,7 @@ index 57f3ac0..637d675 100644
      n = read(up->fd, s, len);
      if (n == len) {
          up->ioStat = 0;
-@@ -196,6 +215,10 @@ void _inbwrd(int unitNum, u64 *value) {
+@@ -196,6 +216,10 @@ void _inbwrd(int unitNum, u64 *value) {
  
      up = getUnit(unitNum, MASK_UNFORMATTED, MAX_FMT_RECL);
      if (up->ioStat != 0) return;
@@ -1020,7 +1815,45 @@ index 57f3ac0..637d675 100644
      n = read(up->fd, (u8 *)value, sizeof(u64));
      if (n == sizeof(u64)) {
          up->ioStat = 0;
-@@ -433,6 +456,17 @@ void _rdurec(int unitNum) {
+@@ -266,10 +290,16 @@ void _openu(int unitNum, ulong fileNameRef, ulong statusRef, ulong accessRef, ul
+     if (isNameDefined) {
+         len = trim(fileName, len);
+         if (len > MAX_FILE_NAME_LEN) {
++            /* no dataset can have the name: the OPEN fails, as one of a
++               dataset that is not there does, for ERR= and IOSTAT= */
+             fputs("File name too long: ", stderr);
+             fwrite(fileName, 1, len, stderr);
+             fputs("\n", stderr);
+-            exit(1);
++            if (unitNum != 0) {
++                up = _allocu(unitNum);
++                if (up != NULL) up->ioStat = EINVAL;
++            }
++            return;
+         }
+         memcpy(fileNameBuf, fileName, len);
+         fileNameBuf[len] = '\0';
+@@ -416,7 +446,19 @@ int _queryu(int unitNum, ulong fileNameRef, long *existRef, long *openedRef, int
+ }
+ 
+ void _rdufmt(int unitNum, void *value) {
++    _inpUnit = unitNum;
+     _inpfmt(value);
++    _inpUnit = 0;
++}
++
++/*
++ *  _rdufin - the end of a formatted READ: slashes left in the format after
++ *  the last item read records too.
++ */
++void _rdufin(int unitNum) {
++    _inpUnit = unitNum;
++    _inpend();
++    _inpUnit = 0;
+ }
+ 
+ void _rdurec(int unitNum) {
+@@ -433,6 +475,17 @@ void _rdurec(int unitNum) {
      limit = s + len;
      up = getUnit(unitNum, 0, MAX_FMT_RECL);
      if (up->ioStat != 0) return;
@@ -1038,7 +1871,31 @@ index 57f3ac0..637d675 100644
      if (up->buf == NULL) {
          up->buf = (char *)malloc(MAX_BUF_SIZE);
          if (up->buf == NULL) {
-@@ -482,7 +516,12 @@ void _rewndu(int unitNum) {
+@@ -441,6 +494,7 @@ void _rdurec(int unitNum) {
+         }
+         up->out = up->limit = up->buf + MAX_BUF_SIZE;
+     }
++    up->recPos = up->pos;
+     while (s < limit) {
+         if (up->out >= up->limit) {
+             n = read(up->fd, up->buf, MAX_BUF_SIZE);
+@@ -451,6 +505,7 @@ void _rdurec(int unitNum) {
+             }
+             else if (n == 0) {
+                 up->ioStat = -1;
++                up->atEnd = 1;
+                 return;
+             }
+             else {
+@@ -459,6 +514,7 @@ void _rdurec(int unitNum) {
+             }
+         }
+         c = *up->out++;
++        up->pos += 1;
+         if (c == '\n') {
+             while (s < limit) *s++ = ' ';
+             break;
+@@ -482,12 +538,87 @@ void _rewndu(int unitNum) {
          up->ioStat = EBADF;
          return;
      }
@@ -1052,10 +1909,59 @@ index 57f3ac0..637d675 100644
          up->ioStat = errno;
      }
      else {
-@@ -490,6 +529,27 @@ void _rewndu(int unitNum) {
+         up->ioStat = 0;
      }
- }
- 
++    if (up->buf != NULL) up->out = up->limit;
++    up->pos = up->recPos = 0;
++    up->atEnd = 0;
++}
++
++/*
++ *  _bkspu - BACKSPACE: back to the beginning of the record read or written
++ *  last, or, after a read that met the end of the file, back to before
++ *  the end of the file, where a write continues the file.  A COS dataset
++ *  is read in sequence, so the dataset is opened again and read as far as
++ *  that point.
++ */
++void _bkspu(int unitNum) {
++    char skip[512];
++    long n;
++    long target;
++    Unit *up;
++
++    if (unitNum <= 0) {
++        fprintf(stderr, "Invalid unit number: %d\n", unitNum);
++        exit(1);
++    }
++    up = _findu(unitNum);
++    if (up == NULL) return;
++    if ((up->flags & MASK_OPEN) == 0) {
++        up->ioStat = EBADF;
++        return;
++    }
++    up->ioStat = 0;
++    if ((up->flags & MASK_DIRECT) != 0) return;
++    target = up->atEnd ? up->pos : up->recPos;
++    if (up->buf != NULL) up->out = up->limit;
++    up->atEnd = 0;
++    if (_reopen(up->fd) == -1) {
++        up->ioStat = errno;
++        return;
++    }
++    up->pos = up->recPos = 0;
++    while (up->pos < target) {
++        n = target - up->pos;
++        if (n > sizeof(skip)) n = sizeof(skip);
++        n = read(up->fd, skip, n);
++        if (n <= 0) {
++            up->ioStat = (n == 0) ? -1 : errno;
++            return;
++        }
++        up->pos += n;
++    }
++    up->recPos = up->pos;
++}
++
 +/*
 + *  _setrec - the record a direct access transfer begins at (REC=)
 + */
@@ -1075,12 +1981,10 @@ index 57f3ac0..637d675 100644
 +    up->daPos = 0;
 +    up->nextRec = rec + 1;
 +    up->ioStat = 0;
-+}
-+
+ }
+ 
  void _wrbchr(int unitNum, unsigned long ref) {
-     int len;
-     int n;
-@@ -500,6 +560,10 @@ void _wrbchr(int unitNum, unsigned long ref) {
+@@ -500,6 +631,10 @@ void _wrbchr(int unitNum, unsigned long ref) {
      if (up->ioStat != 0) return;
      s = (char *)(ref & 0xffffffff);
      len = ref >> 32;
@@ -1091,7 +1995,7 @@ index 57f3ac0..637d675 100644
      n = write(up->fd, s, len);
      if (n == len) {
          up->ioStat = 0;
-@@ -518,6 +582,10 @@ void _wrbwrd(int unitNum, u64 *value) {
+@@ -518,6 +653,10 @@ void _wrbwrd(int unitNum, u64 *value) {
  
      up = getUnit(unitNum, MASK_UNFORMATTED, MAX_FMT_RECL);
      if (up->ioStat != 0) return;
@@ -1102,7 +2006,7 @@ index 57f3ac0..637d675 100644
      n = write(up->fd, (u8 *)value, sizeof(u64));
      if (n == sizeof(u64)) {
          up->ioStat = 0;
-@@ -559,7 +627,14 @@ void _wrufmt(int unitNum, DataValue *value) {
+@@ -559,7 +698,14 @@ void _wrufmt(int unitNum, DataValue *value) {
  static void closeUnit(Unit *up, int doDelete) {
      if (up != NULL && (up->flags & MASK_IMMUTABLE) == 0) {
          up->ioStat = 0;
@@ -1118,7 +2022,7 @@ index 57f3ac0..637d675 100644
              up->flags ^= MASK_OPEN;
              if (close(up->fd) == -1) {
                  up->ioStat = errno;
-@@ -653,6 +728,33 @@ static int openUnit(char *fileName, int unitNum, int flags, int recLen) {
+@@ -653,6 +799,33 @@ static int openUnit(char *fileName, int unitNum, int flags, int recLen) {
      strcpy(up->fileName, fileName);
      mode = 0;
  
@@ -1152,7 +2056,7 @@ index 57f3ac0..637d675 100644
      if ((flags & MASK_NEW) != 0) {
          access = O_CREAT|O_TRUNC|O_RDWR;
          mode = 0640;
-@@ -677,6 +779,185 @@ static int openUnit(char *fileName, int unitNum, int flags, int recLen) {
+@@ -677,6 +850,185 @@ static int openUnit(char *fileName, int unitNum, int flags, int recLen) {
      return 0;
  }
  
@@ -1338,7 +2242,7 @@ index 57f3ac0..637d675 100644
  static void refToCharPtr(ulong ref, char **s, int *len) {
      *s = (char *)(ref & 0xffffffff);
      *len = ref >> 32;
-@@ -697,10 +978,29 @@ static int trim(char *s, int len) {
+@@ -697,10 +1049,32 @@ static int trim(char *s, int len) {
  }
  
  static int writer(Unit *up, void *buf, size_t nbyte) {
@@ -1365,13 +2269,16 @@ index 57f3ac0..637d675 100644
 +     */
 +    len = nbyte;
 +    while (len > 1 && ((char *)buf)[len - 1] == ' ') len -= 1;
++    up->recPos = up->pos;
++    up->pos += len + 1;
++    up->atEnd = 0;
 +    n = write(up->fd, buf, len);
 +    if (n == len) {
          n = write(up->fd, "\n", 1);
          if (n == 1) {
              up->ioStat = 0;
 diff --git a/fortran/runtime/units.h b/fortran/runtime/units.h
-index 25255be..2833c7a 100644
+index 25255be..b043f3d 100644
 --- a/fortran/runtime/units.h
 +++ b/fortran/runtime/units.h
 @@ -61,6 +61,21 @@
@@ -1396,17 +2303,27 @@ index 25255be..2833c7a 100644
  typedef struct unit {
      char fileName[MAX_FILE_NAME_LEN+1];
      int  number;  /* unit number                        */
-@@ -76,6 +91,9 @@ typedef struct unit {
+@@ -76,10 +91,19 @@ typedef struct unit {
      char *buf;    /* dynamically allocated input buffer */
      char *out;    /* next available char in buffer      */
      char *limit;  /* last char in buffer + 1            */
 +    struct daFile *da; /* direct access: the file      */
 +    int  daRec;   /* record of the current transfer     */
 +    int  daPos;   /* byte position within that record   */
++    long pos;     /* sequential: bytes read or written  */
++    long recPos;  /* sequential: where the last record  */
++                  /*   began                            */
++    int  atEnd;   /* the last read met the end of file  */
  } Unit;
  
  Unit *_allocu(int unitNum);
-@@ -93,6 +111,7 @@ int  _queryu(int unitNum, ulong fileNameRef, long *existRef, long *openedRef, in
+ void _closeu(int unitNum, ulong statusRef);
++void _bkspu(int unitNum);
++void _rdufin(int unitNum);
+ void _clrios(int unitNum);
+ void _endfio(void);
+ Unit *_findu(int unitNum);
+@@ -93,6 +117,7 @@ int  _queryu(int unitNum, ulong fileNameRef, long *existRef, long *openedRef, in
               int *reclRef, int *nextRecRef);
  void _rdufmt(int unitNum, void *value);
  void _rdurec(int unitNum);

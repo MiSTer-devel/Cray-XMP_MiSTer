@@ -257,6 +257,10 @@ pub struct Program {
     pub words: Vec<u64>,
     /// Where it starts, as a parcel address.
     pub start: u32,
+    /// The end of its memory, the high limit of the binary: beyond the
+    /// words it was written with when it has blank common, which the
+    /// binary leaves out.
+    pub limit: u32,
 }
 
 impl Program {
@@ -294,10 +298,14 @@ impl Program {
         let image = words
             .get(length + 1..length + 1 + count)
             .ok_or("the text table is cut short")?;
+        let origin = (text & 0xff_ffff) as u32;
+        // the high limit of the binary, word 14 (octal) of the header entry
+        let limit = words.get(1 + 0o14).map_or(0, |w| (w & 0xff_ffff) as u32);
         Ok(Program {
-            origin: (text & 0xff_ffff) as u32,
+            origin,
             words: image.to_vec(),
             start,
+            limit: limit.max(origin + count as u32),
         })
     }
 }
@@ -309,6 +317,8 @@ struct Dataset {
     offset: usize,
     partial: Vec<u64>,
     written: bool,
+    /// Written since it was opened, and not ended with an end of data.
+    unended: bool,
     /// The host file it came from and goes back to, and whether that is text.
     host: Option<(String, bool)>,
 }
@@ -335,6 +345,9 @@ pub struct Options {
     pub log: bool,
     /// Count the instructions of every word, for a profile.
     pub profile: bool,
+    /// Instruction counts at which the station sends an attention
+    /// (`/ATTENTION`), in order.
+    pub attentions: Vec<u64>,
 }
 
 impl Default for Options {
@@ -348,6 +361,7 @@ impl Default for Options {
             trace: false,
             log: true,
             profile: false,
+            attentions: Vec::new(),
         }
     }
 }
@@ -379,12 +393,19 @@ pub struct Job {
     output: Box<dyn Write>,
     /// Instructions executed at each word of the program, with `profile`.
     pub counts: Vec<u64>,
+    /// Reprieve set with F$RPV: the routine (a parcel address), the save
+    /// area for the exchange package, the classes.
+    reprieve: Option<(u32, u32, u64)>,
+    /// An attention was sent and the program was interrupted for it.
+    attention_pending: bool,
 }
 
 impl Job {
     /// The program loaded, its job communication block filled in, ready to run.
     pub fn new(program: &Program, options: Options, output: Box<dyn Write>) -> Result<Job, String> {
-        let high_limit = program.origin + program.words.len() as u32;
+        let high_limit = program
+            .limit
+            .max(program.origin + program.words.len() as u32);
         // COS leaves a small program the field of the control statement
         // processor before it, and a large one little more than itself
         let mut words = if options.words != 0 {
@@ -427,6 +448,8 @@ impl Job {
             input: None,
             output,
             counts,
+            reprieve: None,
+            attention_pending: false,
         };
         job.lay_out(high_limit);
         let statement = job.options.statement.clone();
@@ -569,6 +592,7 @@ impl Job {
             return;
         }
         let mut detected = 0u64;
+        let mut end_of_information = false;
         let mut done = 0usize;
         let mut unused = 0u8;
         let mut line = None;
@@ -583,6 +607,15 @@ impl Job {
         match function {
             // read: part of a record, or to its end
             0o00 | 0o10 => match dataset.items.get(dataset.position) {
+                // the end of the data; one never written has no end of
+                // data to meet, and COS says so in the table's error flags
+                // (DPEOI), with every control word flag set and the words
+                // asked for, which are not data, as it hands them over
+                None if dataset.items.is_empty() && !dataset.written => {
+                    end_of_information = true;
+                    detected = 0o17;
+                    done = count;
+                }
                 None => detected = 1,
                 Some(Item::FileMark) => {
                     detected = 2;
@@ -607,6 +640,7 @@ impl Job {
             0o40 | 0o50 | 0o52 | 0o56 => {
                 dataset.items.truncate(dataset.position);
                 dataset.written = true;
+                dataset.unended = function != 0o56;
                 done = count;
                 dataset.partial.extend_from_slice(&data);
                 if function == 0o50 {
@@ -649,6 +683,9 @@ impl Job {
         }
         let flags = self.load(table + 5);
         self.store(table + 5, flags & !(0xf << 60) | detected << 60);
+        // DPEOI, bit 1 of word 1: the end of the data on a read
+        let word = self.load(table + 1) & !(1 << 62);
+        self.store(table + 1, word | (end_of_information as u64) << 62);
         self.store(
             table + 7,
             function << 54 | (unused as u64) << 48 | (done as u64) << 24 | area as u64,
@@ -801,9 +838,16 @@ impl Job {
                 self.dataset(&name);
                 self.tables.insert(table, name);
             }
+            // close; a dataset written and not ended has no data under
+            // COS: a read after it is opened again finds the end at once
             0o013 => {
                 let name = self.name_at(address);
                 let dataset = self.dataset(&name);
+                if dataset.unended {
+                    dataset.items.clear();
+                    dataset.partial.clear();
+                    dataset.unended = false;
+                }
                 dataset.position = 0;
                 dataset.offset = 0;
             }
@@ -829,8 +873,33 @@ impl Job {
                     };
                 }
             }
+            // COS makes the job wait for a line with or without automatic recall
             0o022 => self.read_circular(address),
             0o023 => self.write_circular(address),
+            // reprieve: set (S2 = 0) with a table of the routine's parcel
+            // address, the save area and the classes; go on with an
+            // exchange package (S2 = -1); or end (anything else)
+            0o045 => match self.package(10) {
+                0 => {
+                    let routine = self.load(address) as u32 & 0xff_ffff;
+                    let save = self.load(address + 1) as u32 & 0xff_ffff;
+                    let classes = self.load(address + 2);
+                    self.reprieve = (classes != 0).then_some((routine, save, classes));
+                }
+                u64::MAX => {
+                    // the saved package, but where the program is in memory
+                    // stays the system's; no answer in S0
+                    for n in 0..16u32 {
+                        let mut word = self.load(address + n);
+                        if n == 1 || n == 2 {
+                            word = word & !(0x7ffff << 29) | self.package(n) & (0x7ffff << 29);
+                        }
+                        self.machine.store(n, Some(word));
+                    }
+                    return None;
+                }
+                _ => return Some(End::Aborted),
+            },
             0o027 => {
                 let seconds = self.machine.time() as f64 * 9.5e-9;
                 self.store(address, cray_float(seconds));
@@ -878,6 +947,16 @@ impl Job {
             if self.machine.instructions() >= max {
                 return End::Limit;
             }
+            if self
+                .options
+                .attentions
+                .first()
+                .is_some_and(|&at| self.machine.instructions() >= at)
+            {
+                self.options.attentions.remove(0);
+                self.attention_pending = true;
+                self.machine.request_mcu_interrupt();
+            }
             if profile && !self.machine.monitor_mode() {
                 let word = (self.machine.p() >> 2) as usize;
                 if word < self.counts.len() {
@@ -894,6 +973,14 @@ impl Job {
             if self.machine.monitor_mode() && self.machine.p() == handler {
                 let word = self.package(3);
                 let flags = (word >> 24) as u16 & 0o777;
+                if flags & flag::MCU_INTERRUPT != 0 && self.attention_pending {
+                    self.attention_pending = false;
+                    self.machine.store(3, Some(word & !(0o777 << 24)));
+                    if let Some(end) = self.attention() {
+                        return end;
+                    }
+                    continue;
+                }
                 if flags & flag::NORMAL_EXIT == 0 {
                     let p = (self.package(0) >> 24) as u32 & 0xff_ffff;
                     let what = if flags & flag::ERROR_EXIT != 0 {
@@ -919,6 +1006,26 @@ impl Job {
                     return end;
                 }
             }
+        }
+    }
+
+    /// The station's attention: the program's reprieve routine for it gets
+    /// the exchange package and runs, or the program is ended.  Reprieve
+    /// ends when its routine is entered, as under COS.
+    fn attention(&mut self) -> Option<End> {
+        const ATTENTION: u64 = 0o10000;
+        match self.reprieve.take() {
+            Some((routine, save, classes)) if classes & ATTENTION != 0 => {
+                for n in 0..16u32 {
+                    let word = self.package(n);
+                    self.store(save + n, word);
+                }
+                let word = self.package(0);
+                self.machine
+                    .store(0, Some(word & !(0xff_ffff << 24) | (routine as u64) << 24));
+                None
+            }
+            _ => Some(End::Aborted),
         }
     }
 

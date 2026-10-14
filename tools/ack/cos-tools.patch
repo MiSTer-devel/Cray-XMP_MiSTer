@@ -21,10 +21,99 @@ index c9675d2..ce7f051 100644
      if (appendCW(ds, rcw) == -1) return -1;
      ds->lastRecordBlock = ds->currentBlock;
 diff --git a/ldr.c b/ldr.c
-index 0e68c47..5e78210 100644
+index 0e68c47..d2bec26 100644
 --- a/ldr.c
 +++ b/ldr.c
-@@ -1427,11 +1427,18 @@ static int processBRT(Dataset *ds, u64 hdr, int tableLength) {
+@@ -44,6 +44,7 @@ static void addSuffix(char *inPath, char *suffix, char *outPath);
+ static bool addUnsatisfiedExternal(u8 *id);
+ static void adjustEntryPoints(Symbol *symbol);
+ static void calculateBaseAddresses(Block *block);
++static void calculateBlankCommonAddress(Block *block);
+ static void calculateCommonBaseAddresses(Block *block);
+ static void calculateModuleName(char *path, u8 *name);
+ static int collectLibraryModules(Dataset *ds, char *sourcePath);
+@@ -56,6 +57,7 @@ static u64 getField(u8 *bytes, u32 rightmostBit, u16 fieldLength);
+ static char *getTableType(u8 type);
+ static u64 getWord(u8 *bytes);
+ static int idcmp(u8 *id1, u8*id2, int len);
++static bool isBlankCommon(Block *block);
+ static int isLibrary(Dataset *ds, int pass, char *sourcePath);
+ static int loadLibraryModule(Dataset *ds, Module *module, char *libraryPath, int pass, u64 *tableHeader);
+ static int loadLibraryModules(int pass);
+@@ -88,6 +90,7 @@ static int writeTXT(Dataset *ds);
+ static char   currentDate[9];
+ static char   currentTime[9];
+ static u32    blockLimit = 0200;
++static u32    textLimit = 0;
+ static Module *currentModule = NULL;
+ static int    errorCount = 0;
+ static Block  *firstBlocks[BlockTypes] = {NULL,NULL,NULL,NULL,NULL,NULL,NULL};
+@@ -272,6 +275,8 @@ int main(int argc, char *argv[]) {
+             calculateCommonBaseAddresses(firstBlocks[BlockType_Common]);
+             calculateCommonBaseAddresses(firstBlocks[BlockType_TaskCom]);
+             calculateBaseAddresses(firstBlocks[BlockType_Dynamic]);
++            textLimit = blockLimit;
++            calculateBlankCommonAddress(firstBlocks[BlockType_Common]);
+             imageSize *= 8;
+             image = (u8 *)allocate(imageSize);
+ #if DEBUG
+@@ -573,6 +578,7 @@ static void calculateCommonBaseAddresses(Block *block) {
+     u32 limit;
+     u8 *moduleId;
+ 
++    while (block != NULL && isBlankCommon(block)) block = block->nextInImage;
+     if (block == NULL) return;
+ 
+     blockId = block->id;
+@@ -581,6 +587,10 @@ static void calculateCommonBaseAddresses(Block *block) {
+     commonLimit = blockLimit;
+ 
+     while (block != NULL) {
++        if (isBlankCommon(block)) {
++            block = block->nextInImage;
++            continue;
++        }
+         if (block->isAbsolute) {
+             block->baseAddress = 0;
+             limit = block->origin + block->length;
+@@ -613,6 +623,36 @@ static void calculateCommonBaseAddresses(Block *block) {
+     }
+ }
+ 
++//
++//  Blank common is allocated last, after all other blocks, at the length of
++//  its longest declaration, as the CRAY loader does it.  No data can be
++//  stored in it at load time, so the binary ends where it begins: the
++//  binary's high limit includes it, and the system gives the program that
++//  memory when it loads it.
++//
++static void calculateBlankCommonAddress(Block *block) {
++    u32 length;
++
++    length = 0;
++    for (; block != NULL; block = block->nextInImage) {
++        if (isBlankCommon(block) && !block->isAbsolute) {
++            block->baseAddress = blockLimit;
++            if (block->length > length) length = block->length;
++        }
++    }
++    blockLimit += length;
++    if (blockLimit > imageSize) imageSize = blockLimit;
++}
++
++static bool isBlankCommon(Block *block) {
++    int i;
++
++    for (i = 0; i < 8; i++) {
++        if (block->id[i] != ' ' && block->id[i] != '\0') return FALSE;
++    }
++    return TRUE;
++}
++
+ static void calculateModuleName(char *path, u8 *name) {
+     char *cp;
+     Fnv32_t hash;
+@@ -1427,11 +1467,18 @@ static int processBRT(Dataset *ds, u64 hdr, int tableLength) {
                             | (image[imageOffset+1] << 16)
                             | (image[imageOffset+2] <<  8)
                             |  image[imageOffset+3];
@@ -45,6 +134,15 @@ index 0e68c47..5e78210 100644
                  }
                  image[imageOffset  ] =  imageBytes >> 24;
                  image[imageOffset+1] = (imageBytes >> 16) & 0xff;
+@@ -1939,7 +1986,7 @@ static int writeTXT(Dataset *ds) {
+     //
+     //  Write header word
+     //
+-    wordCount = blockLimit - 0200;
++    wordCount = textLimit - 0200;
+     byteCount = wordCount * 8;
+     word = ((u64)LDR_TT_TXT << 60) | ((wordCount + 1) << 36) | 0200;
+     if (cosDsWriteWord(ds, word) == -1) return -1;
 diff --git a/parse.c b/parse.c
 index c53f978..05fa098 100644
 --- a/parse.c

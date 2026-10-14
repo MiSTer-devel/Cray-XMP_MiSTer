@@ -136,14 +136,21 @@ tools/target/release/cray-xmp-job hello.abs
 tools/target/release/cray-xmp-job prog.abs --in lines.txt --ds DATA=data.bin --profile prog.map
 ```
 
-`$IN` is the terminal, or the lines of `--in`; `$OUT` is the terminal. A
-dataset is a file on the computer: `--ds NAME=FILE` in COS's blocked format,
+`$IN` is the terminal, or the lines of `--in`; `$OUT` is the terminal.
+`--attention N` has the station send an attention after N instructions, for a
+program that catches it (`_onattn` below). A dataset is a file on the
+computer: `--ds NAME=FILE` in COS's blocked format,
 which is what `expdisk.py put` takes, or `--text NAME=FILE` as text. A dataset
 the program wrote is written back to its file at the end. `--profile` with the
 loader's map (`ldr -m`) lists the instructions executed by routine, and
 `--trace` every request. A program that is interrupted (an address outside its
 field, a floating point error) ends the run with the place and its registers.
 The header of `tools/crates/job/src/bin/cray-xmp-job.rs` has the options.
+
+Where COS was found to do something a library can trip over, the tool does
+it too: a read of a dataset never written gets words that are not data
+along with COS's end-of-data flag, and a dataset written and closed without
+an end of data reads as empty.
 
 A run is a second where the system model with COS takes minutes, and its
 counts of instructions are exact. Its times are not: every instruction takes
@@ -494,6 +501,31 @@ again (`expdisk.py rm`).
   loader let an address that wraps around, a symbol less a constant, carry
   into the register field of its instruction, and a program of certain
   lengths above 127 blocks got an end of data where its record ends.
+- Blank common (FORTRAN's `COMMON` without a name, or a CAL `SECTION COMMON`
+  without one) comes last in the program and is not in the binary: the
+  binary's high limit takes it in, and COS gives the program that memory.
+  The startup code clears it, because the control statement processor
+  that ran in the same memory before the program leaves words there. A
+  table there costs no room on the disk: Cray Blitz's hash table made its
+  binary 10 MB where it is 3 now.
+- A read of a dataset stops at the end of its file and does not read the
+  next record before it is asked for one, and a write after a read begins
+  where the read stopped. The kit took the flag for an end of file to be 4,
+  where COS sets 2, and read on into the next file; and the end of the data
+  of a dataset not yet written, which COS reports among the error flags of
+  the dataset's table, gave an empty record and then an I/O error. And to go
+  back in a dataset (a rewind) the library opens it again: what was written
+  is now ended first, as at its close, where COS had nothing to read in it
+  after. That is what a FORTRAN program needs that reads a file to its end
+  and adds to it, or reads back what it wrote.
+- `_onattn(&flag)` has the station's attention (`/ATTENTION`, the BREAK
+  key of a real station) set `flag` to -1 where it would end the program;
+  the program goes on where it was. It is COS's reprieve (`F$RPV`, class
+  10000 octal), which in COS 1.17 takes the routine's address as a parcel
+  address. A program cannot see otherwise that something was typed while
+  it works: COS keeps a job that reads the session's input waiting for the
+  line, with or without automatic recall. Cray Blitz takes the opponent's
+  move this way while it thinks on the opponent's time.
 - The kit also compiles Pascal and BASIC. A first program in each did not
   link here (`Unsatisfied external reference`), and that was not followed up.
 - On Linux the assembler of COS-Tools needs the one-line change the
@@ -517,13 +549,24 @@ integer array. `tools/ack/cos-tools-fortran.patch` adds that mode and what
 else the compiler and its runtime lacked for such programs: `PRINT f` with
 no list, `RETURN` with an expression, A input into a word left-justified,
 direct access records (the record number was ignored), a fresh record after
-a `/` at the end of a format, and room for formats of 256 descriptors.
+a `/` at the end of a format, and room for formats of 256 descriptors. On
+input a `/` reads the next record, also when it comes after the last item
+(it read on in the same record), and `BACKSPACE` goes back over the record
+read or written last, or after the end of the file back to before it (it
+did nothing). An `OPEN` of a name that no dataset can have, longer than
+seven characters, fails as one of a dataset that is not there does, so that
+`ERR=` sees it; it stopped the program.
 
 The same patch has the bit functions of Cray FORTRAN compiled in line (`AND`,
-`OR`, `XOR`, `NOT` and `ISHFT`, with `IAND`, `IOR`, `IEOR` and `COMPL`), and
-the product of two integers below 2**24. Each was a call, and the compiler's
-code is what it is otherwise: a statement at a time, every value through
-memory. An octal or hexadecimal constant (`O'17'`, `X'FF'`) has all its 64
+`OR`, `XOR`, `NOT` and `ISHFT`, with `IAND`, `IOR`, `IEOR` and `COMPL`), the
+product of two integers below 2**24, and `MIN`, `MAX` and `ABS` of integers.
+Each was a call. The condition of an `IF` is compiled as jumps, a compare
+and a jump for each relation, with `.AND.` and `.OR.` jumping as soon as the
+outcome is known: the compiler made each relation a value with a jump and
+tested the result with another (`fortran/jumps.c`, a pass over the compiled
+program, in the cross-compiler only). The code is otherwise what it was: a
+statement at a time, every value through memory. An octal or hexadecimal
+constant (`O'17'`, `X'FF'`) has all its 64
 bits; it was cut to 32, so that a mask of 40 bits was all ones.
 
 Routines in Cray's assembly language link with the compiler's code: its

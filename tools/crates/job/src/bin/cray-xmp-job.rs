@@ -4,7 +4,7 @@
 //! ```text
 //! cray-xmp-job PROGRAM [--in FILE] [--ds NAME=FILE]... [--text NAME=FILE]...
 //!              [--statement TEXT] [--batch] [--words N] [--max N] [--cp N]
-//!              [--profile MAP] [--top N] [--trace] [--quiet]
+//!              [--profile MAP] [--top N] [--attention N]... [--trace] [--quiet]
 //! ```
 //!
 //! * `PROGRAM`: an absolute binary, as COS-Tools' `ldr` and `ack -mcos`
@@ -29,6 +29,9 @@
 //!   program reads (4 unless given).
 //! * `--profile MAP`: at the end, the instructions executed by routine,
 //!   from the loader's map (`ldr -m`); `--top N` shows N of them (30).
+//! * `--attention N`: the station sends an attention (`/ATTENTION`) after N
+//!   instructions; the program's reprieve routine for it runs, or the
+//!   program ends.  Given again for more.
 //! * `--trace`: every system request, on standard error.
 //! * `--quiet`: without the lines for the log and the summary.
 //!
@@ -40,7 +43,7 @@
 use cray_xmp_job::{map_entries, profile, End, Job, Options, Program};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cray-xmp-job PROGRAM [--in FILE] [--ds NAME=FILE]... [--text NAME=FILE]... [--statement TEXT] [--batch] [--words N] [--max N] [--cp N] [--profile MAP] [--top N] [--trace] [--quiet]";
+const USAGE: &str = "usage: cray-xmp-job PROGRAM [--in FILE] [--ds NAME=FILE]... [--text NAME=FILE]... [--statement TEXT] [--batch] [--words N] [--max N] [--cp N] [--profile MAP] [--top N] [--attention N]... [--trace] [--quiet]";
 
 struct Arguments {
     program: String,
@@ -89,6 +92,10 @@ fn arguments() -> Result<Arguments, String> {
             "--profile" => a.map = Some(value("--profile")?),
             "--top" => a.top = number("--top", value("--top")?)?,
             "--trace" => a.options.trace = true,
+            "--attention" => a
+                .options
+                .attentions
+                .push(number("--attention", value("--attention")?)?),
             "--quiet" => a.quiet = true,
             _ if arg.starts_with("--") => return Err(format!("unknown option {}", arg)),
             _ if program.is_none() => program = Some(arg),

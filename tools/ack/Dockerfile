@@ -23,7 +23,11 @@ RUN apt-get update \
 # words of a dataset were computed in 32 bits, and for a program of some
 # lengths above 127 blocks the end of its record came out as an end of
 # data.  And the loader let an address that wraps around (a symbol less a
-# constant) carry into the register field of its instruction.
+# constant) carry into the register field of its instruction.  The loader
+# also places blank common last, after all other blocks, as CRAY's loader
+# does, and leaves it out of the binary, whose high limit takes it in: it
+# wrote it out as zeros, and a program with a large table there (Cray
+# Blitz's hash table) took 10 MB on the disk where it takes 3.
 COPY ack/cos-tools.patch /src/cos-tools.patch
 RUN git clone https://github.com/kej715/COS-Tools /src/COS-Tools \
  && cd /src/COS-Tools && git checkout 6600331 \
@@ -49,6 +53,23 @@ RUN git clone https://github.com/kej715/COS-Tools /src/COS-Tools \
 # - realloc copies what the old block holds.  It copied one block more,
 #   past the end of a new block that is no larger in blocks than the old
 #   one, which the next free ran into.
+# - The startup clears blank common, which the binary no longer holds:
+#   COS gives a program memory that is zero, but the control statement
+#   processor ran in the same memory before it and leaves words there.
+# - A read stops at the end of a file of a dataset (it took the flag for
+#   one to be 4 where COS sets 2, and read on into the next file) and at
+#   the end of the data that COS reports among the table's error flags (a
+#   dataset not yet written gave an empty record, then an I/O error), and
+#   it does not read the next record before it is asked for one; a write
+#   after a read begins where the read stopped; and what was written is
+#   ended before the dataset is opened again to go back in it (a rewind),
+#   as at its close, where COS had nothing to read.  Together they let a
+#   FORTRAN program read a file to its end and add to it, and read back
+#   what it wrote.
+# - _onattn(&flag) has the station's attention (/ATTENTION, BREAK) set a
+#   word instead of ending the program, which goes on where it was: COS's
+#   reprieve.  A program cannot otherwise see a line typed while it works,
+#   since COS keeps a job that reads the session's input waiting for it.
 # - memcpy and memset move whole words where they can, and a binary read
 #   copies what the library has read in one piece: both went a byte at a
 #   time, each byte through two calls.
@@ -74,9 +95,21 @@ RUN cd /src/ack && git apply /src/ack-cos.patch \
 # - Direct access records (REC= was parsed and ignored).  A direct access
 #   file is held in memory while it is open, in pieces, so that it takes
 #   the room of its records; units that open the same file share it.
+# - BACKSPACE (it was parsed and did nothing): back over the record read
+#   or written last, or after the end of the file back to before it, so
+#   that a program can add to a file it read.  A slash in the format of a
+#   READ reads the next record (it read on in the same one), also after
+#   the last item.  An OPEN of a name no dataset can have (more than seven
+#   characters) fails as one of a dataset that is not there does, for ERR=
+#   and IOSTAT=; it stopped the program.
 # - The bit functions AND, OR, XOR, NOT (with IAND, IOR, IEOR, COMPL) and
-#   ISHFT are compiled in line, and so is the product of two integers
-#   below 2**24 (larger ones go to the library).  Each was a call.
+#   ISHFT are compiled in line, and so are the product of two integers
+#   below 2**24 (larger ones go to the library) and MIN, MAX and ABS of
+#   integers.  Each was a call.
+# - The condition of an IF is compiled as jumps: a relation is a compare
+#   and a jump, .AND. and .OR. jump as soon as the outcome is known
+#   (jumps.c, a pass over the compiled program).  Each relation was made
+#   a value, with a jump, and the result tested with another.
 # - An octal or hexadecimal constant (O'17', X'FF') has all 64 bits; it
 #   was cut to 32, and a mask of 40 bits came out as all ones.
 # - A 64-bit DATA value is written whole (the compiler printed it as a

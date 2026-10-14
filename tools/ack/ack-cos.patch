@@ -727,7 +727,7 @@ index 98a539b..a3207a2 100644
  
           end
 diff --git a/plat/cos/boot.s b/plat/cos/boot.s
-index c7f4d38..aaadfc5 100644
+index c7f4d38..bcc07c9 100644
 --- a/plat/cos/boot.s
 +++ b/plat/cos/boot.s
 @@ -11,7 +11,20 @@ JCLFT:    = O'103            ; Base of LFT (bits 40-63)
@@ -752,7 +752,7 @@ index c7f4d38..aaadfc5 100644
            ext      @%ftFini
            ext      @%ftInit
            ext      @%m%a%i%n
-@@ -21,6 +34,27 @@ text:   section code
+@@ -21,6 +34,58 @@ text:   section code
  %%start:  =        *
            start    %%start
  *
@@ -764,6 +764,37 @@ index c7f4d38..aaadfc5 100644
 +          s1       s1>24
 +          s1       s1&s2
 +          heapb,   s1
++*
++*  Clear blank common, which the loader places last and leaves out of
++*  the binary.  The memory COS gives a program is zero, but the control
++*  statement processor that loaded it ran in the same memory before it,
++*  and what it left there is not covered where the binary ends.  Blank
++*  common runs from its base (this module declares a word of it) to the
++*  program's high limit.
++*
++          a1       bcbase    ; the next word to clear
++          a2       s1
++          a2       a2-a1     ; words left
++          s4       0
++          a3       64
++          a4       1
++          vl       a3
++          v0       s4&v0     ; 64 zeros
++%%clr1:   =        *
++          a0       a2-a3
++          jam      %%clr2    ; if fewer than 64 are left
++          a0       a1
++          ,a0,a4   v0
++          a1       a1+a3
++          a2       a2-a3
++          j        %%clr1
++%%clr2:   =        *
++          a0       a2
++          jaz      %%clr3    ; if none is left
++          vl       a2
++          a0       a1
++          ,a0,a4   v0
++%%clr3:   =        *
 +          s3       JCLFT,    ; base of the system-managed LFT's
 +          s3       s3&s2
 +          s3       s3-s1     ; words free between them
@@ -780,7 +811,7 @@ index c7f4d38..aaadfc5 100644
  *  Initialize local base, stack pointer, and heap pointer
  *
            s1       JCLFT,    ; preset stack pointer to base of system-managed LFT's
-@@ -30,9 +64,7 @@ text:   section code
+@@ -30,9 +95,7 @@ text:   section code
            s3       s3-s1
            a7       s3
            a6       a7        ; preset local base to stack pointer
@@ -791,7 +822,7 @@ index c7f4d38..aaadfc5 100644
            a5       s3
  *
  *  Parse command line arguments
-@@ -119,6 +151,8 @@ hol0:     =        w.*
+@@ -119,8 +182,15 @@ hol0:     =        w.*
  *  Storage for argc, argv, and the envp array.
  
  bss:      section  data
@@ -800,8 +831,15 @@ index c7f4d38..aaadfc5 100644
  argc:     bss      1
  argv:     bssz     MAX%ARGS+1
  envp:     bssz     1
+ 
++*  The base of blank common.
++
++          section  common
++bcbase:   bss      1
++
+           end
 diff --git a/plat/cos/include/sys/files.h b/plat/cos/include/sys/files.h
-index 37b5360..89459f5 100644
+index 37b5360..ff6b5b1 100644
 --- a/plat/cos/include/sys/files.h
 +++ b/plat/cos/include/sys/files.h
 @@ -82,11 +82,13 @@ u64     _bp2wp(void *ptr);
@@ -818,8 +856,16 @@ index 37b5360..89459f5 100644
  int     _coswdp(FtEntry *entry, void *uda, int ct);
  int     _coswed(FtEntry *entry);
  int     _coswef(FtEntry *entry);
+@@ -99,6 +101,7 @@ void    _ftFree(FtEntry *entry);
+ FtEntry *_ftPtr(int fd);
+ DSP     *_getdsp(FtEntry *entry);
+ int     _reopen(int fd);
++int     _onattn(long *flag);
+ void    *_wp2bp(u64 u);
+ 
+ #endif
 diff --git a/plat/cos/libsys/build.lua b/plat/cos/libsys/build.lua
-index a10dff6..47db837 100644
+index a10dff6..561c9fd 100644
 --- a/plat/cos/libsys/build.lua
 +++ b/plat/cos/libsys/build.lua
 @@ -58,6 +58,7 @@ acklibrary {
@@ -830,7 +876,7 @@ index a10dff6..47db837 100644
  		"./cosrew.s",
  		"./cosrls.s",
  		"./costim.s",
-@@ -71,6 +72,7 @@ acklibrary {
+@@ -71,11 +72,13 @@ acklibrary {
  		"./files.c",
  		"./frmptr.s",
  		"./getdsp.s",
@@ -838,6 +884,12 @@ index a10dff6..47db837 100644
  		"./i24tod.s",
  		"./i24too.s",
  		"./i32tox.s",
+ 		"./isatty.c",
+ 		"./lseek.c",
++		"./onattn.s",
+ 		"./open.c",
+ 		"./pack.s",
+ 		"./pargs.c",
 diff --git a/plat/cos/libsys/cosrdc.s b/plat/cos/libsys/cosrdc.s
 new file mode 100644
 index 0000000..d652b5c
@@ -941,8 +993,78 @@ index 2ad51b6..6191717 100644
 +    dsp = _getdsp(entry);
 +    return (int)((dsp->first >> 28) & 1);
  }
+diff --git a/plat/cos/libsys/onattn.s b/plat/cos/libsys/onattn.s
+new file mode 100644
+index 0000000..2db65cb
+--- /dev/null
++++ b/plat/cos/libsys/onattn.s
+@@ -0,0 +1,64 @@
++#include "cos.h"
++
++**
++*  @%onattn - set a word when the station sends an attention
++*
++*  int _onattn(long *flag)
++*
++*  An attention (/ATTENTION at the station, or its BREAK key) would end
++*  the program.  After this call it sets *flag to -1 instead, and the
++*  program goes on where it was: COS hands the program's exchange package
++*  to a reprieve routine here, which sets the word, asks for the next
++*  attention to come here too, and gives the package back.  A program
++*  watches the word the way it would a flag set by an interrupt.
++*
++*  Entry
++*    (SP)   : byte pointer to the flag
++*
++*  Exit
++*    S7 : 0
++*
++         entry     @%onattn
++
++text:    section   code
++
++@%onattn:bss       0
++         s1        ,a7            ; byte address of the flag
++         s1        s1>3           ; word address
++         flagad,   s1
++         a1        rpvent         ; COS takes the routine's address as a
++         a1        a1+a1          ; parcel address
++         a1        a1+a1
++         rpvtab,   a1
++         a1        xpsave
++         rpvtab+1, a1
++         s1        rpvtab
++         s2        0              ; set reprieve
++         s0        F$RPV
++         ex
++         s7        0
++         j         b00
++
++*  Entered with the program's registers, all of which the saved exchange
++*  package gives back.
++rpvent:  bss       0
++         a1        flagad,
++         s1        -1
++         ,a1       s1
++         s1        rpvtab         ; again: entering the routine ended it
++         s2        0
++         s0        F$RPV
++         ex
++         s1        xpsave         ; go on with the saved exchange package
++         s2        -1
++         s0        F$RPV
++         ex
++         j         rpvent
++
++data:    section   data
++flagad:  bssz      1
++rpvtab:  bssz      2              ; the routine, the save area
++         con       O'10000        ; the class: an interactive attention
++xpsave:  bssz      40             ; exchange package and what COS adds
++
++         end
 diff --git a/plat/cos/libsys/read.c b/plat/cos/libsys/read.c
-index c353e1c..c56c9ab 100644
+index c353e1c..acfcbb3 100644
 --- a/plat/cos/libsys/read.c
 +++ b/plat/cos/libsys/read.c
 @@ -4,6 +4,80 @@
@@ -1026,7 +1148,7 @@ index c353e1c..c56c9ab 100644
  static int readNextSegment(FtEntry *entry) {
      u8 cwf;
      DSP *dsp;
-@@ -11,9 +85,11 @@ static int readNextSegment(FtEntry *entry) {
+@@ -11,13 +85,26 @@ static int readNextSegment(FtEntry *entry) {
  
      entry->out = entry->in = 0;
  
@@ -1036,10 +1158,26 @@ index c353e1c..c56c9ab 100644
      n = _cosrdp(entry, entry->uda, COS_UDA_SIZE);
  
 -    dsp = _getdsp(entry);
++    /*
++     *  DPEOI: the read went past the end of the data, as in a dataset not
++     *  yet written.  COS then hands over words that are not data (and
++     *  every control word flag): they are not taken.
++     */
++    if ((dsp->first & (1UL << 62)) != 0) {
++        entry->status = COS_EOD;
++        return 0;
++    }
++
++    /* the control words met: 10 end of record, 2 end of file, 1 end of data */
      cwf = dsp->cwf >> 60;
      if ((cwf & 1) != 0)
          entry->status = COS_EOD;
-@@ -39,6 +115,7 @@ ssize_t read(int fd, void *buffer, size_t count) {
+-    else if ((cwf & 4) != 0)
++    else if ((cwf & 2) != 0)
+         entry->status = COS_EOF;
+     else if ((cwf & 8) != 0)
+         entry->status = COS_EOR;
+@@ -39,6 +126,7 @@ ssize_t read(int fd, void *buffer, size_t count) {
      u8 b;
      u8 *bp;
      FtEntry *entry;
@@ -1047,7 +1185,7 @@ index c353e1c..c56c9ab 100644
      u8 *limit;
      int n;
  
-@@ -53,6 +130,7 @@ ssize_t read(int fd, void *buffer, size_t count) {
+@@ -53,6 +141,7 @@ ssize_t read(int fd, void *buffer, size_t count) {
  
      if ((entry->access & O_BINARY) == 0) { // text mode
  
@@ -1055,15 +1193,16 @@ index c353e1c..c56c9ab 100644
          while (bp < limit) {
              if (entry->blankCount > 0) {
                  *bp++ = ' ';
-@@ -63,6 +141,7 @@ ssize_t read(int fd, void *buffer, size_t count) {
+@@ -63,6 +152,8 @@ ssize_t read(int fd, void *buffer, size_t count) {
                      *bp++ = '\n';
                      entry->status = 0;
                      entry->blankCount = 0;
 +                    if (isInteractive) break; /* a line at a time, as a terminal gives */
++                    continue; /* the next segment only if more is wanted */
                  }
  
                  if (entry->status != 0) break;
-@@ -114,8 +193,12 @@ ssize_t read(int fd, void *buffer, size_t count) {
+@@ -114,8 +205,12 @@ ssize_t read(int fd, void *buffer, size_t count) {
  
                  if (readNextSegment(entry) == -1) return -1;
              }
@@ -1078,8 +1217,23 @@ index c353e1c..c56c9ab 100644
              }
          }
      }
+diff --git a/plat/cos/libsys/reopen.c b/plat/cos/libsys/reopen.c
+index da961a3..e566773 100644
+--- a/plat/cos/libsys/reopen.c
++++ b/plat/cos/libsys/reopen.c
+@@ -27,7 +27,9 @@ int _reopen(int fd)
+         n = _ftFlsh(entry);
+         if (n < 0) return -1;
+     }
+-    if ((entry->access & O_ACCMODE) == O_WRONLY && entry->position > 0) {
++    /* what was written ends the data, as at close: COS has no data to
++       read where a dataset was written and not ended */
++    if ((entry->flags & IsWritten) != 0) {
+         rc = _coswed(entry);
+         if (rc != 0) {
+             errno = EIO;
 diff --git a/plat/cos/libsys/write.c b/plat/cos/libsys/write.c
-index effbae0..0d0fd42 100644
+index effbae0..164b922 100644
 --- a/plat/cos/libsys/write.c
 +++ b/plat/cos/libsys/write.c
 @@ -7,7 +7,49 @@
@@ -1177,7 +1331,23 @@ index effbae0..0d0fd42 100644
  ssize_t write(int fd, void *buffer, size_t count) {
      u8 *bp;
      u8 byte;
-@@ -68,12 +139,7 @@ ssize_t write(int fd, void *buffer, size_t count) {
+@@ -56,6 +127,15 @@ ssize_t write(int fd, void *buffer, size_t count) {
+         return -1;
+     }
+ 
++    /*
++     *  The data area holds what was read last and no data to be written:
++     *  the write begins where the reading stopped, with an empty area.
++     */
++    if ((entry->flags & IsDirty) == 0) {
++        entry->in = entry->out = 0;
++        entry->blankCount = 0;
++    }
++
+     if ((entry->access & O_BINARY) != 0) {
+         si  = 0;
+         while (si < count) {
+@@ -68,12 +148,7 @@ ssize_t write(int fd, void *buffer, size_t count) {
              entry->position += n;
              if (entry->position > entry->maxPosition) entry->maxPosition = entry->position;
              if (entry->in >= COS_UDA_SIZE_BYTES) {
@@ -1191,7 +1361,7 @@ index effbae0..0d0fd42 100644
              }
          }
      }
-@@ -92,12 +158,7 @@ ssize_t write(int fd, void *buffer, size_t count) {
+@@ -92,12 +167,7 @@ ssize_t write(int fd, void *buffer, size_t count) {
                  entry->position += 1;
                  if (entry->position > entry->maxPosition) entry->maxPosition = entry->position;
                  if (entry->in >= COS_UDA_SIZE_BYTES && !IS_STDERR(entry)) {
