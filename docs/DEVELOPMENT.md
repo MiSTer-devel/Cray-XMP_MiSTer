@@ -6,6 +6,11 @@ is made of and where it differs from a real one, see [MACHINE.md](MACHINE.md).
 ## Layout
 
 - `Cray-XMP.sv`: the MiSTer `emu` wrapper. `files.qip` lists what Quartus builds.
+- `rtl/mister/xmp_frontend.sv`: console clock crossings, keyboard and screen
+  selection, printer display, terminal rendering and audio.
+- `rtl/mister/xmp_reset.sv`: reset synchronization and stretching for the CPU,
+  I/O Subsystem, display and serial receiver. The frame-aligned terminal reset
+  remains in `Cray-XMP.sv` with the MiSTer video integration.
 - `rtl/xmp_machine.v`: the machine. The CPU with the X-MP features and the I/O
   Subsystem, joined by the channel pair between them.
 - `rtl/cray/`: CPU modules written for this core.
