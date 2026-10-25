@@ -21,7 +21,8 @@ is made of and where it differs from a real one, see [MACHINE.md](MACHINE.md).
   port, the printer's file, clock domain crossings.
 - `rtl/terminal/`: the screens, the keyboard and the video.
 - `sys/`: the MiSTer framework, an unmodified copy of
-  [Template_MiSTer](https://github.com/MiSTer-devel/Template_MiSTer).
+  [Template_MiSTer at `5dda373`](https://github.com/MiSTer-devel/Template_MiSTer/tree/5dda37366d02b04b8448da7b322235c1831af811/sys).
+  Update it by copying the entire upstream `sys/` directory unchanged.
 - `sim/`: Verilator simulations. `tools/`: assembler, reference models, scripts.
 - `tests/`: test programs.
 - `software/cos-1.17/`: COS 1.17 as it was recovered: the I/O Subsystem's
@@ -640,12 +641,16 @@ The same operations are available through
 `python3 tools/py/verible.py format|format-check [files...]`. `format-check`
 returns nonzero when formatting differs; both return nonzero on tool errors.
 
-The project scope is the `Cray-XMP.sv` wrapper and the Verilog and SystemVerilog
-sources under `rtl/` and `sim/`, including new, untracked files. Ignored files
-are excluded.
+The formatter covers Verilog and SystemVerilog sources under `rtl/` and
+`sim/`, including new, untracked files. Ignored files are excluded.
 
-Vendored files are never formatted:
+These files are never formatted:
 
+- `Cray-XMP.sv`, which follows upstream `Template.sv` layout and comments so
+  framework integration changes can be pasted into the shared sections;
+  it retains upstream CRLF line endings and whitespace. Unused port defaults
+  stay in template order; actively used ports are driven in their corresponding
+  functional sections. The Cray-specific implementation follows the shared sections
 - `sys/`, the MiSTer framework
 - `rtl/pll.v` and `rtl/pll/`, generated IP
 
@@ -657,7 +662,7 @@ aligned declarations, ports and assignments, a 120-column target, settings in
 `.verible-format.flags`. Verible emits spaces, so the wrapper expands leading
 tabs at four-column stops before formatting and restores them afterwards. It
 protects strings, comments and `verilog_format: off/on` regions. `.editorconfig`
-uses the same tab width. Validated with Verible `v0.0-4219-g3275ab72`.
+uses the same tab width. Validated with Verible `v0.0-4296-g0f262651`.
 
 ## Linting
 
@@ -679,6 +684,8 @@ Warnings are fatal. The policy and the waivers are in `lint/exclusions.vlt`:
   connections are not checked anywhere.
 - `sys/` and the PLL stub are loaded so that connections from project RTL are
   checked, but their own diagnostics are suppressed.
+- Keep upstream template code intact and put any necessary lint exceptions
+  in `lint/exclusions.vlt`, rather than changing the shared code for lint.
 - Everything else, the cray-1x sources included, has waivers only for
   reviewed cases, each with its reason: the `hps_io` ports this core does not
   use, named one by one; bits the floating-point arithmetic forms and then

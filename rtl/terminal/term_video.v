@@ -50,8 +50,9 @@ module term_video (
 	output reg  hblank,
 	output reg  vblank,
 	output reg  video,
-	output reg  half,       // the pixel is of a cell at half intensity
-	output wire frame_tick  // one clock pulse per frame, for the cursor and the flashing
+	output reg  half,          // the pixel is of a cell at half intensity
+	output wire hvcnt_atzero,
+	output wire frame_tick     // one clock pulse per frame, for the cursor and the flashing
 );
 
 	localparam H_TOTAL = 10'd936;
@@ -71,7 +72,8 @@ module term_video (
 	wire [9:0] hc_nxt = h_last ? 10'd0 : hc + 1'd1;
 	wire [9:0] vc_nxt = !h_last ? vc : (vc >= v_total - 1'd1) ? 10'd0 : vc + 1'd1;
 
-	assign frame_tick = ce_pix & h_last & (vc >= v_total - 1'd1);
+	assign frame_tick   = ce_pix & h_last & (vc >= v_total - 1'd1);
+	assign hvcnt_atzero = ce_pix && (hc == 10'd0) && (vc == 10'd0);
 
 	// fonts
 	reg [7:0] font16[0:4095];

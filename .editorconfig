@@ -8,6 +8,10 @@ indent_style = tab
 indent_size = 4
 tab_width = 4
 
+[Cray-XMP.sv]
+end_of_line = crlf
+trim_trailing_whitespace = false
+
 # Imported components and generated IP retain their upstream formatting.
 [{sys/**,rtl/pll.v,rtl/pll/**,sim/obj_dir/**,sim/build/**}]
 charset = unset
