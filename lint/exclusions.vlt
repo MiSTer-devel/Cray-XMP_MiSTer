@@ -198,11 +198,10 @@ lint_off -rule UNUSEDSIGNAL -file "Cray-XMP.sv" -match "*Bits of signal are not 
 
 // Cray-XMP.sv: hps_io counts 16,384 bytes of a disk request and the largest here is
 // 4,096; Buffer Memory is 4 million words of the 16 million the channel can
-// address.
+// address; four of the six consoles of the I/O Subsystem are not shown.
 lint_off -rule UNUSEDSIGNAL -file "Cray-XMP.sv" -match "*Bits of signal are not used: 'sd_buff_addr'[13:12]*"
 lint_off -rule UNUSEDSIGNAL -file "Cray-XMP.sv" -match "*Bits of signal are not used: 'bm_addr'[23:22]*"
-// The frontend shows two of the I/O Subsystem's six consoles.
-lint_off -rule UNUSEDSIGNAL -file "rtl/mister/xmp_frontend.sv" -match "*Bits of signal are not used: 'char'[41:28,20:7]*"
+lint_off -rule UNUSEDSIGNAL -file "Cray-XMP.sv" -match "*Bits of signal are not used: 'char'[41:28,20:7]*"
 // Only the mounting of the printer's file and of a tape matters, and their lengths in
 // blocks of 512 bytes.
 lint_off -rule UNUSEDSIGNAL -file "Cray-XMP.sv" -match "*Bits of signal are not used: 'img_mounted'[1:0]*"

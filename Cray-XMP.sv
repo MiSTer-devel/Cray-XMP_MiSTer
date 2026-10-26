@@ -125,9 +125,9 @@ wire HBlank;
 wire HSync;
 wire VBlank;
 wire VSync;
-wire ce_pix;
+reg ce_pix;
 wire hvcnt_atzero;
-wire [23:0] video;
+wire video;
 
 // Leave H/V sync always on. This stabilizes the video output while the core
 // is in reset. This example releases the reset when H/V counters are at zero.
@@ -183,20 +183,56 @@ pll_ios pll_ios
 	.locked()
 );
 
-wire uart_break;
-wire reset_cpu, reset_ios, uart_reset;
-
-xmp_reset resets
+wire uart_break, uart_break_cpu;
+cdc_bit sync_break
 (
-	.clk_cpu(clk_cpu),
-	.clk_ios(clk_ios),
-	.clk_sys(clk_sys),
-	.host_reset(RESET | status[0] | buttons[1] | ioctl_download),
-	.uart_break(uart_break),
-	.reset_cpu(reset_cpu),
-	.reset_ios(reset_ios),
-	.reset(reset),
-	.uart_reset(uart_reset)
+	.clk(clk_cpu),
+	.d(uart_break),
+	.q(uart_break_cpu)
+);
+
+reg host_reset_ios;
+wire host_reset;
+always @(posedge clk_ios) host_reset_ios <= RESET | status[0] | buttons[1] | ioctl_download;
+cdc_bit sync_host_reset
+(
+	.clk(clk_cpu),
+	.d(host_reset_ios),
+	.q(host_reset)
+);
+
+reg reset_cpu, uart_reset_cpu;
+reg [15:0] reset_cnt;
+
+always @(posedge clk_cpu) begin
+	uart_reset_cpu <= host_reset;
+	if(host_reset | uart_break_cpu) begin
+		reset_cpu <= 1;
+		reset_cnt <= '1;
+	end else if(reset_cnt != 0) reset_cnt <= reset_cnt - 1'd1;
+	else reset_cpu <= 0;
+end
+
+wire reset_ios;
+cdc_bit sync_reset_ios
+(
+	.clk(clk_ios),
+	.d(reset_cpu),
+	.q(reset_ios)
+);
+
+wire uart_reset;
+cdc_bit sync_reset
+(
+	.clk(clk_sys),
+	.d(reset_cpu),
+	.q(reset)
+);
+cdc_bit sync_uart_reset
+(
+	.clk(clk_sys),
+	.d(uart_reset_cpu),
+	.q(uart_reset)
 );
 
 localparam [2:0] CENTRAL = 3'b000;
@@ -412,6 +448,192 @@ assign sd_blk_cnt[1]  = 6'd7;
 assign sd_blk_cnt[2]  = 6'd0;
 assign sd_blk_cnt[3]  = 6'd0;
 
+localparam OPERATOR = 3;
+localparam STATION  = 0;
+
+assign char_ready[1] = 1'b1;
+assign char_ready[2] = 1'b1;
+assign char_ready[4] = 1'b1;
+assign char_ready[5] = 1'b1;
+assign key_valid[1]  = 1'b0;
+assign key_valid[2]  = 1'b0;
+assign key_valid[4]  = 1'b0;
+assign key_valid[5]  = 1'b0;
+assign key[13:7]     = 7'd0;
+assign key[20:14]    = 7'd0;
+assign key[41:28]    = 14'd0;
+
+wire [13:0] con_tx_data, con_rx_data, term_data;
+wire [1:0] con_tx_valid, con_tx_ready, con_rx_valid, con_rx_ready, term_valid, term_ready;
+
+cdc_stream #(.W(7)) operator_tx
+(
+	.src_clk(clk_ios),
+	.src_reset(reset_ios),
+	.src_data(char[7*OPERATOR+:7]),
+	.src_valid(char_valid[OPERATOR]),
+	.src_ready(char_ready[OPERATOR]),
+	.dst_clk(clk_sys),
+	.dst_reset(reset),
+	.dst_data(con_tx_data[6:0]),
+	.dst_valid(con_tx_valid[0]),
+	.dst_ready(con_tx_ready[0])
+);
+
+cdc_stream #(.W(7)) station_tx
+(
+	.src_clk(clk_ios),
+	.src_reset(reset_ios),
+	.src_data(char[7*STATION+:7]),
+	.src_valid(char_valid[STATION]),
+	.src_ready(char_ready[STATION]),
+	.dst_clk(clk_sys),
+	.dst_reset(reset),
+	.dst_data(con_tx_data[13:7]),
+	.dst_valid(con_tx_valid[1]),
+	.dst_ready(con_tx_ready[1])
+);
+
+cdc_stream #(.W(7)) operator_rx
+(
+	.src_clk(clk_sys),
+	.src_reset(reset),
+	.src_data(con_rx_data[6:0]),
+	.src_valid(con_rx_valid[0]),
+	.src_ready(con_rx_ready[0]),
+	.dst_clk(clk_ios),
+	.dst_reset(reset_ios),
+	.dst_data(key[7*OPERATOR+:7]),
+	.dst_valid(key_valid[OPERATOR]),
+	.dst_ready(key_ready[OPERATOR])
+);
+
+cdc_stream #(.W(7)) station_rx
+(
+	.src_clk(clk_sys),
+	.src_reset(reset),
+	.src_data(con_rx_data[13:7]),
+	.src_valid(con_rx_valid[1]),
+	.src_ready(con_rx_ready[1]),
+	.dst_clk(clk_ios),
+	.dst_reset(reset_ios),
+	.dst_data(key[7*STATION+:7]),
+	.dst_valid(key_valid[STATION]),
+	.dst_ready(key_ready[STATION])
+);
+
+reg [2:0] key_tgl;
+reg [10:0] ps2_key_s = 0;
+always @(posedge clk_sys) begin
+	key_tgl <= {key_tgl[1:0], ps2_key[10]};
+	if(key_tgl[2] != key_tgl[1]) ps2_key_s <= {~ps2_key_s[10], ps2_key[9:0]};
+end
+
+reg [1:0] visible;
+reg key_stb;
+always @(posedge clk_sys) begin
+	key_stb <= ps2_key_s[10];
+	if(reset) visible <= 2'd0;
+	else if(key_stb != ps2_key_s[10] && ps2_key_s[9:8] == 2'b10) begin
+		if(ps2_key_s[7:0] == 8'h05) visible <= 2'd0;
+		if(ps2_key_s[7:0] == 8'h06) visible <= 2'd1;
+		if(ps2_key_s[7:0] == 8'h04) visible <= 2'd2;
+	end
+end
+
+wire [6:0] shown_char, prt_data;
+wire shown_valid, shown_taken, prt_valid, prt_ready;
+
+print_screen print_screen
+(
+	.clk(clk_ios),
+	.reset(reset_ios),
+
+	.i_char(print_char),
+	.i_valid(print_valid && spool_ready),
+	.o_ready(shown_ready),
+
+	.o_char(shown_char),
+	.o_valid(shown_valid),
+	.i_ready(shown_taken)
+);
+
+cdc_stream #(.W(7)) printer_tx
+(
+	.src_clk(clk_ios),
+	.src_reset(reset_ios),
+	.src_data(shown_char),
+	.src_valid(shown_valid),
+	.src_ready(shown_taken),
+	.dst_clk(clk_sys),
+	.dst_reset(reset),
+	.dst_data(prt_data),
+	.dst_valid(prt_valid),
+	.dst_ready(prt_ready)
+);
+
+wire no_file, started;
+cdc_bit sync_no_file
+(
+	.clk(clk_sys),
+	.d(boot_missing),
+	.q(no_file)
+);
+cdc_bit sync_started
+(
+	.clk(clk_sys),
+	.d(boot_done),
+	.q(started)
+);
+
+wire [7:0] kbd_data;
+wire kbd_valid, kbd_ready;
+
+wire [13:0] sent_data;
+wire [1:0] sent_valid, sent_ready;
+
+term_keyboard #(.CAPS(1)) keyboard
+(
+	.clk(clk_sys),
+	.reset(reset),
+	.ps2_key(ps2_key_s),
+	.dout(kbd_data),
+	.dout_valid(kbd_valid),
+	.dout_ready(kbd_ready)
+);
+
+xmp_console #(
+	.CLK_HZ(CLK_HZ),
+	.BAUD(115200)
+) console
+(
+	.clk(clk_sys),
+	.reset(reset),
+	.uart_reset(uart_reset),
+
+	.no_file(no_file),
+	.started(started),
+
+	.tx_data(con_tx_data),
+	.tx_valid(con_tx_valid),
+	.tx_ready(con_tx_ready),
+	.rx_data(con_rx_data),
+	.rx_valid(con_rx_valid),
+	.rx_ready(con_rx_ready),
+
+	.term_data(term_data),
+	.term_valid(term_valid),
+	.term_ready(term_ready),
+
+	.key_data(sent_data),
+	.key_valid(sent_valid),
+	.key_ready(sent_ready),
+
+	.uart_rxd(UART_RXD),
+	.uart_txd(UART_TXD),
+	.uart_break(uart_break)
+);
+
 reg  [19:0] act_cnt;
 always @(posedge clk_cpu) begin
 	if(mem_req && !cpu_held) act_cnt <= '1;
@@ -428,50 +650,76 @@ end
 
 assign LED_DISK = {1'b1, disk_cnt != 0};
 
+wire half, bell;
+
 wire font_8x8 = ~status[14];
 
-xmp_frontend #(.CLK_HZ(CLK_HZ)) frontend
+xmp_terminal terminal
 (
-	.clk_sys(clk_sys),
-	.clk_ios(clk_ios),
-	.reset(reset),
-	.reset_ios(reset_ios),
-	.reset_core(reset_core),
-	.uart_reset(uart_reset),
-
-	.boot_missing(boot_missing),
-	.boot_done(boot_done),
-
-	.char(char),
-	.char_valid(char_valid),
-	.char_ready(char_ready),
-	.key(key),
-	.key_valid(key_valid),
-	.key_ready(key_ready),
-
-	.print_char(print_char),
-	.print_valid(print_valid && spool_ready),
-	.print_ready(shown_ready),
-
-	.ps2_key(ps2_key),
-	.font_8x8(font_8x8),
-	.col(col),
-
-	.uart_rxd(UART_RXD),
-	.uart_txd(UART_TXD),
-	.uart_break(uart_break),
+	.clk(clk_sys),
+	.reset(reset_core),
 
 	.ce_pix(ce_pix),
 	.hvcnt_atzero(hvcnt_atzero),
+
 	.hblank(HBlank),
 	.hsync(HSync),
 	.vblank(VBlank),
 	.vsync(VSync),
+
 	.video(video),
-	.audio(AUDIO_L)
+
+	.font_8x8(font_8x8),
+	.visible(visible),
+
+	.rx_data({prt_data, term_data}),
+	.rx_valid({prt_valid, term_valid}),
+	.rx_ready({prt_ready, term_ready}),
+
+	.key_data(kbd_data),
+	.key_valid(kbd_valid),
+	.key_ready(kbd_ready),
+
+	.tx_data(sent_data),
+	.tx_valid(sent_valid),
+	.tx_ready(sent_ready),
+
+	.half(half),
+	.bell(bell)
 );
 
+always @(posedge clk_sys) begin
+	reg [1:0] div;
+	div    <= div + 2'd1;
+	ce_pix <= font_8x8 ? (div == 2'd0) : ~div[0];
+end
+
+localparam [14:0] BELL_HALF = 15'(CLK_HZ / 2000 - 1);
+reg bell_tone;
+reg [14:0] bell_div;
+always @(posedge clk_sys)
+	if(!bell) begin
+		bell_tone <= 1'b0;
+		bell_div  <= 15'd0;
+	end else if(bell_div == BELL_HALF) begin
+		bell_tone <= ~bell_tone;
+		bell_div  <= 15'd0;
+	end else bell_div <= bell_div + 15'd1;
+
+assign AUDIO_L = {3'd0, bell_tone, 12'd0};
 assign AUDIO_R = AUDIO_L;
+
+reg [23:0] rgb;
+always @(*) begin
+	case(col)
+		2'd0: rgb = 24'hFFFFFF;
+		2'd1: rgb = 24'h33FF33;
+		2'd2: rgb = 24'hFFB000;
+		2'd3: rgb = 24'h40FFFF;
+	endcase
+end
+
+wire [23:0] lit = !video ? 24'd0 : half ? {1'b0, rgb[23:17], 1'b0, rgb[15:9], 1'b0, rgb[7:1]} : rgb;
 
 wire [2:0] fx = status[9:7];
 
@@ -494,9 +742,9 @@ video_mixer #(
 	.scandoubler(doubled),
 	.hq2x(fx == 3'd1),
 	.gamma_bus(gamma_bus),
-	.R(video[23:16]),
-	.G(video[15:8]),
-	.B(video[7:0]),
+	.R(lit[23:16]),
+	.G(lit[15:8]),
+	.B(lit[7:0]),
 	.HSync(~HSync),
 	.VSync(~VSync),
 	.HBlank(HBlank),

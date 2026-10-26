@@ -35,8 +35,6 @@ rtl/ios/ios_link.v
 rtl/mister/ddr3_ports.sv
 rtl/mister/xmp_boot.v
 rtl/mister/xmp_console.v
-rtl/mister/xmp_frontend.sv
-rtl/mister/xmp_reset.sv
 rtl/mister/print_spool.v
 rtl/mister/print_screen.v
 rtl/terminal/xmp_terminal.v

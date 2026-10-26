@@ -429,9 +429,9 @@ int main(int argc, char **argv) {
         std::vector<std::string> lines;
         for (size_t at = 0; at < want.size();) { size_t nl = want.find('\n', at); lines.push_back(want.substr(at, nl - at)); at = nl + 1; }
         lines.resize(24);
-        int top_row = r->emu__DOT__frontend__DOT__terminal__DOT__top_row[c];
+        int top_row = r->emu__DOT__terminal__DOT__top_row[c];
         // the first page of the terminal's memory; a cell that was cleared and never written holds a null
-        const auto &cells = c ? r->emu__DOT__frontend__DOT__terminal__DOT__g_screen__BRA__1__KET____DOT__chars : r->emu__DOT__frontend__DOT__terminal__DOT__g_screen__BRA__0__KET____DOT__chars;
+        const auto &cells = c ? r->emu__DOT__terminal__DOT__g_screen__BRA__1__KET____DOT__chars : r->emu__DOT__terminal__DOT__g_screen__BRA__0__KET____DOT__chars;
         for (int y = 0; y < 24 && screens_right; y++)
             for (int x = 0; x < 80; x++) {
                 char got = cells[(y + top_row) % 24 * 80 + x] & 0x7F, expect = x < (int)lines[y].size() ? lines[y][x] : ' ';
@@ -447,12 +447,12 @@ int main(int argc, char **argv) {
     for (int c : screens) printf("\n---- %s\n%s----\n", c ? "station" : "operator's console", screen(console[c]).c_str());
     if (printer_screen) {
         // nothing else carries what the printer's screen shows: its 24 lines as the core holds them
-        int top_row = r->emu__DOT__frontend__DOT__terminal__DOT__top_row[2];
+        int top_row = r->emu__DOT__terminal__DOT__top_row[2];
         printf("\n---- printer's screen\n");
         for (int y = 0; y < 24; y++) {
             std::string line;
             for (int x = 0; x < 80; x++) {
-                char got = r->emu__DOT__frontend__DOT__terminal__DOT__g_screen__BRA__2__KET____DOT__chars[(y + top_row) % 24 * 80 + x] & 0x7F;
+                char got = r->emu__DOT__terminal__DOT__g_screen__BRA__2__KET____DOT__chars[(y + top_row) % 24 * 80 + x] & 0x7F;
                 line.push_back(got ? AmpexScreen::shown(got) : ' ');
             }
             size_t end = line.find_last_not_of(' ');
