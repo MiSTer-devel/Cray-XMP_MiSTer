@@ -34,9 +34,10 @@ module xmp_terminal #(
 	output wire vsync,
 	output wire hblank,
 	output wire vblank,
+	output wire hvcnt_atzero,
 	output wire video,
-	output wire half,    // the pixel is of a character at half intensity
-	output wire bell     // the bell of the screen that is shown sounds
+	output wire half,          // the pixel is of a character at half intensity
+	output wire bell           // the bell of the screen that is shown sounds
 );
 
 	wire [       11:0] raddr;
@@ -186,6 +187,7 @@ module xmp_terminal #(
 		.vsync        (vsync),
 		.hblank       (hblank),
 		.vblank       (vblank),
+		.hvcnt_atzero (hvcnt_atzero),
 		.video        (video),
 		.half         (half),
 		.frame_tick   (frame_tick)

@@ -9,9 +9,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 EXTENSIONS = {".v", ".sv", ".vh", ".svh"}
 SOURCES = [
-    "Cray-XMP.sv",
     "rtl",
     "sim",
+    # Keep the wrapper's Template.sv layout and the framework verbatim.
+    ":(exclude)Cray-XMP.sv",
     ":(exclude)sys/**",
     ":(exclude)rtl/pll.v",
     ":(exclude)rtl/pll/**",

@@ -113,6 +113,9 @@ lint_off -rule UNOPTFLAT -file "sys/*"
 lint_off -file "lint/pll.sv"
 lint_off -rule TIMESCALEMOD -file "lint/pll.sv"
 
+// Template.sv leaves the PLL's unused lock output unconnected.
+lint_off -rule PINMISSING -file "Cray-XMP.sv" -match "*Instance has missing pin: 'locked'"
+
 // Only waive the HPS ports this core does not use. Name each port so that
 // accidentally dropping a required connection still produces PINMISSING.
 lint_off -rule PINMISSING -file "Cray-XMP.sv" -match "*Instance has missing pin: 'joystick_0'"

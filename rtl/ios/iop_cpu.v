@@ -348,7 +348,7 @@ module iop_cpu (
 				end else if (g_shift) {c, a} <= ca_shift;
 				else if (g_imm || g_reg || g_b) begin
 					{c, a} <= ca_op;
-					if (stores && g_reg) or_mem[f[5]?b : d] <= or_res;
+					if (stores && g_reg) or_mem[f[5] ? b : d] <= or_res;
 					if (stores && g_b) b <= ca_op[8:0];
 				end else if (g_branch) begin
 					if (taken) begin
