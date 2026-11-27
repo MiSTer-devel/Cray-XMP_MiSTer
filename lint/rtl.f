@@ -48,6 +48,7 @@ rtl/terminal/term_video.v
 rtl/cray/cray_cpu.v
 rtl/cray/cray_mem_mux.v
 rtl/cray/mem_fu.v
+rtl/cray/mem_xfer.v
 rtl/cray/res_lanes.v
 rtl/cray/res_regfile.v
 rtl/cray/vector_add.v

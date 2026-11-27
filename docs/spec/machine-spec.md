@@ -405,7 +405,7 @@ the left.
 |---|---|---|---|---|
 | w1 35 | WS | exchanged while a test and set was holding in CIP | hardware | no |
 | w1 36 | FPS | a floating-point error occurred, whatever IFP is | hardware; cleared by 002100 or 002200 [X 125] | no |
-| w1 37 | BDM | block reads and writes may run concurrently | 002600 sets, 002500 clears | no (may be carried only) |
+| w1 37 | BDM | block reads and writes may run concurrently | 002600 sets, 002500 clears | yes: with it clear a load holds while port C is busy and a store while A or B is |
 | w1 39 | IMM | "enables all interrupts in monitor mode except PC, MCU, I/O, and ICP" | no | no |
 | w2 35 | IOR | enables operand range interrupts | 002300 sets, 002400 clears | may be treated as always 1 outside monitor mode |
 | w2 36 | ICM | correctable memory error interrupts | no | store and load only |

@@ -7,7 +7,7 @@ The machine is a CRAY X-MP with one processor and its I/O Subsystem, as far as
 the operating system COS 1.17 needs one: that is the only operating system
 that survives for these machines, and it is a build for the X-MP. The CPU has
 the instruction set the X-MP shares with the CRAY-1 of 1982 and what the X-MP
-added to it. The I/O Subsystem is three I/O Processors with the devices COS
+added to it. The I/O Subsystem is two I/O Processors with the devices COS
 and the subsystem's own software work with.
 
 The references are the CRAY X-MP Series Model 14 mainframe reference manual,
@@ -164,24 +164,29 @@ Subsystem dead starts COS 1.17 and runs batch jobs.
 - **The status register** (073i01) as the manual has it: ones in the low
   half, the cluster number only in monitor mode.
 - **Modes.** 0021 and 0022 switch the floating-point interrupt mode. 0025 and
-  0026 switch the bidirectional memory bit, which is only carried. 0027 waits
+  0026 switch the bidirectional memory mode, with which a block read and a
+  block write run at the same time (see Memory). 0027 waits
   for memory references to finish. The floating-point error status bit sets
   on any floating-point error and is cleared by 0021 and 0022. 0021 to 0027
   and 073i01 wait for results still on their way, so that a floating-point
   error is counted under the modes its instruction saw.
-- **Channels.** Four pairs of 6 Mbyte channels, 10 to 17 octal, the even
-  ones input and the odd ones output (`rtl/cray/xmp_channels.v`). In monitor
+- **Channels.** Two pairs of 6 Mbyte channels, 10 to 13 octal, the even
+  ones input and the odd ones output (`rtl/cray/xmp_channels.v`). An X-MP
+  has up to four pairs, two to each of its I/O ports (CSM-0111000 pages 1-3
+  and 2-13); two is what the smallest one has, the X-MP/14se (HR-3005
+  tables 4-1 and 4-2), and COS 1.17 works one. In monitor
   mode 0011 enters a limit address, 0010 a current address and starts the
   channel, 0012 clears its flags and stops it; 0012j1 also raises the Master
   Clear line of an output channel or forgets a held Ready of an input
   channel. 033 reads the lowest numbered channel that asks for an interrupt,
   a current address, or the error flag, which is always zero. Only the low
-  four bits of the channel number count, and 0 to 7 name no channel. A
+  four bits of the channel number count, and 0 to 7 and 14 to 17 name no
+  channel. A
   channel moves 16-bit parcels, four to a word, to or from absolute
   addresses. An input channel stops at its limit or at the device's
   Disconnect and holds a Ready that finds it stopped. A channel that asks
   sets the I/O interrupt flag outside monitor mode. The first pair, 10 and
-  11, leads to the MIOP of the I/O Subsystem; the other three lead nowhere.
+  11, leads to the MIOP of the I/O Subsystem; the other leads nowhere.
 - **Gather, scatter and compress index** (CSM-0111000 pages 5-87 to 5-92),
   which the X-MP got in 1985 and COS 1.17 does not use: 176i1k `Vi ,A0,Vk`
   reads the words at (A0) + (Vk element), 1771jk `,A0,Vk Vj` writes them, and
@@ -261,33 +266,60 @@ and block transfers as for vector loads and stores.
 ## The I/O Subsystem
 
 COS does no input or output itself. It talks to the I/O Subsystem, a cabinet
-of up to four 16-bit I/O Processors with their own software (the kernel and
+of two to four 16-bit I/O Processors with their own software (the kernel and
 its overlays), which also is the operator's way into the machine. This core
-has three of them, which is what the stock software of COS 1.17 expects:
+has the two that every I/O Subsystem has (HR-3005 table 4-2 gives two as the
+smallest number):
 
-- **MIOP**, the master. It dead starts the others and the mainframe, and has
+- **MIOP**, the master. It dead starts the BIOP and the mainframe, and has
   the operator's console and the station.
 - **BIOP**, which has the disk drives and the 100 Mbyte channel that moves
   their data to and from central memory.
-- **XIOP**, which on a real machine has the block multiplexer channels to tape
-  units. Here it is a processor with a console and nothing else; the software
-  wants it to answer.
+
+The machine the software came from had a third, the **XIOP**, with the block
+multiplexer channels to its tape units, and its software is configured for
+three: with two it tests memory, dead starts the others and waits for the
+third for ever. This core has no tape units and nothing else for an XIOP to
+do, and the Local Memory of one processor alone is about a fifth of the
+FPGA's memory blocks, so it is left out and the software is told. Six parcels of the boot
+tape are changed on their way into the boot file
+([tools/py/mkboot.py](../tools/py/mkboot.py)):
+
+- Five in the kernel's table of what it is configured with (the overlay
+  AMAP): no third processor to dead start, and no channel pair to it on the
+  MIOP or on the BIOP.
+- One in the overlay that passes the mainframe's requests on to the other
+  processors (CDEM): a request for a tape unit is dropped where it was handed
+  to the XIOP. Without that the MIOP stops with `IOP-0 HALT 020` when COS
+  sends one, as it does at its start for tape units it has in its
+  configuration. On the system model with all three processors the XIOP
+  gives that request no answer either.
+
+The package's lists of parameters take the tape units out of COS's
+configuration as well ([The system on the card](#the-system-on-the-card)),
+and then COS sends no such request. What an operator sees of it: the
+kernel's `CONFIG` shows no `IOP3` on channels 12 and 13, the BIOP has the
+XIOP's share of Buffer Memory, and the station's `TAPE` lists no units. All
+of this is from the system model; start-up, batch jobs, an interactive
+session and a second start from the same drive were run on it with two
+processors.
 
 What they are made of (`rtl/ios/`):
 
 - The processor (`iop_cpu.v`): accumulator, carry, B register, 512 operand
-  registers, a 16-entry exit stack, 65,536 parcels of Local Memory. Its clock
-  is the real one's 80 MHz, and an instruction takes the clock periods in
-  which the manual has its result delivered (HR-0030 section 6): one for a
-  PASS, a constant or a function that sends, two to five for the other
-  register instructions, seven to thirteen with an operand in Local Memory,
-  five for a branch inside the instruction stack and nine for one that
-  leaves it. The reference model counts the same, and the processor is
-  checked against it clock period for clock period.
+  registers, a 16-entry exit stack, an instruction stack of 32 parcels,
+  65,536 parcels of Local Memory. Its clock is the real one's 80 MHz. An
+  instruction issues when what it needs is free, by the manuals' rules
+  (HR-0030 section 6 and, where that is silent, section 7 of CSM-1009):
+  shifts follow each other every 2 clock periods, a word from Local Memory
+  is in the accumulator 7 behind the issue while instructions that do not
+  want it go on, a branch inside the instruction stack takes 5 and one that
+  fills it again 9. The reference model keeps the same rules, and the
+  processor is checked against it clock period for clock period.
 - On every processor: a real-time clock that asks for an interrupt every
   millisecond, a channel to Buffer Memory, and a channel pair to each other
   processor, over which one can master clear and dead start another.
-- Buffer Memory, shared by the three, in DDR3.
+- Buffer Memory, shared by the two, in DDR3.
 - On the MIOP: the Peripheral Expander with a tape drive (the boot tape, which
   holds the kernel's overlays, or a tape file from the menu), a disk (the
   COS binary, parameter files and jobs) and a printer; the channel pair to
@@ -351,6 +383,18 @@ code and oddity by oddity:
   and Ctrl+Delete CHAR DEL and LINE DEL, Shift+Tab BACK TAB and Page Down the
   PAGE key. F1 to F3 choose the screen and F12 is the MiSTer's menu.
 - **The bell** is a tone of 1 kHz on the audio outputs.
+- **The station's line.** The station is also on the MiSTer's serial port
+  (the HPS UART, `/dev/ttyS1` on its Linux side; the menu's UART entry is
+  the framework's): 9,600 baud, eight bits, no parity, the characters the
+  terminal is sent and the ones it sends, for a terminal elsewhere or a
+  program on the MiSTer. The core sends only while the other end has the
+  port open (Clear To Send), and the station then prints at the line's
+  speed, as it does with "Device times: Real"; what comes in is typed at the
+  station, through a queue of 16 characters, and Request To Send is dropped
+  when the queue is half full: the kernel takes some 300 characters a
+  second, a line 960. The operator's console has no line. This is checked
+  in simulation, and on a DE10-Nano a statement sent over the line was typed
+  at the station and the station's display came back over it.
 
 Where the firmware can go round a loop for good (`ESC X` in protect mode
 with auto flip is one way there), the terminal takes no more characters or
@@ -384,10 +428,15 @@ disk, the ones COS is installed and started with:
 - The device in Buffer Memory is off. Buffer Memory does not keep its
   contents, and with the device COS asks at every start whether to write its
   label anew.
+- The four tape units are taken out of the configuration: they are the
+  XIOP's, which the core does not have. The lists as they were recovered
+  have them as not available, and COS asks the I/O Subsystem about them all
+  the same.
 
 The drive is made on the system model: COS installs itself on an empty
 drive, and a job saves the programs of [software/cos-tools](../software/cos-tools/README.md)
-on it. Nothing of COS itself is patched.
+on it. Nothing of COS itself is patched; the six parcels for two I/O
+Processors are in the I/O Subsystem's own software, on the boot tape.
 
 The software has no list of users, so an `ACCOUNT` statement is taken as it
 comes. Who owns a saved dataset still matters: an interactive session is
@@ -402,7 +451,7 @@ the kernel runs. The boot file ([tools/py/mkboot.py](../tools/py/mkboot.py))
 holds the kernel and the tape. After every reset `rtl/mister/xmp_boot.v`
 checks the file and copies the kernel to the start of Buffer Memory, and the
 MIOP loads its Local Memory from there. The kernel tests memory, loads its
-overlays from the tape, starts the other two processors and asks for the date.
+overlays from the tape, starts the BIOP and asks for the date.
 The CPU is held by Master Clear until `START` is typed; then the kernel loads
 COS from the expander disk through the channel pair and lets the CPU go.
 
@@ -484,16 +533,27 @@ and what is not there.
   nothing in it but its count 13, with a scalar load 22.5, with a scalar
   store 14; a vector load of 64 words 1.4 a word and a vector store 1.3. A
   vector add of registers takes 72 for its 64 elements, as the manual's
-  times give.
-- **One memory port.** The X-MP has three, two for loads and one for stores,
-  so that two block or vector loads and a store can be under way together,
-  and a memory bank takes a new reference every 8 clock periods (pages 2-5,
-  2-22, 5-64). Here one block or vector transfer is under way at a time,
-  the next memory instruction of any kind holds issue until it is done, and
-  scalar references are made one after the other in the order they issued,
-  eight of them waiting at most. A loop that loads two vectors, adds them
-  and stores the sum takes 4.3 clock periods an element on a DE10-Nano, the
-  three transfers one after the other; the same work with scalar
+  times give. A branch to code that is in no buffer takes 23 clock periods
+  in simulation with a memory that answers at once, the core's own sequence
+  reading half a buffer a word a clock, and about 38 with the DDR3's times;
+  when the port to DDR3 has kept the code's line ([Memory](#memory)) it is
+  between the two. On a DE10-Nano a loop of calls to eight routines of a
+  buffer each, more code than the four buffers hold, takes 56 clock periods
+  a call, where it took 85 before lines were kept; in simulation with a
+  memory that answers at once it takes 49.
+- **The memory ports share one path to DDR3.** The X-MP's three ports are
+  here, two for reads and one for writes, and two block or vector loads and
+  a store can be under way together (pages 2-5, 2-22, 5-64), but their words
+  all go through the one 64-bit port to the DDR3, a word a clock period,
+  and the ports hold the transfers' words until it takes them. A
+  memory bank of the X-MP takes a new reference every 8 clock periods; here
+  the DDR3 answers a read about 16 clock periods after it is taken and the
+  words of a transfer come one behind the other. Scalar references are made
+  one after the other in the order they issued, eight of them waiting at
+  most, and while no port is busy. A loop that loads two vectors, adds them
+  and stores the sum takes 3.1 clock periods an element on a DE10-Nano (4.3
+  when the core had one port), and 2.7 with a floating-point multiply and
+  add between the loads and the store (4.3); the same sum with scalar
   instructions takes 49.
 - **The instruction behind a block or vector transfer** waits two clock
   periods more unless a look at the first address and the step shows that
@@ -509,8 +569,8 @@ and what is not there.
   2-12). The mode instructions 0021 to 0024 wait for every result and
   memory reference on its way; the X-MP issues them at once (page 5-16).
 - **No memory errors.** The memory error flag never sets and the error fields
-  of the exchange package are zero. The two memory error modes and the
-  bidirectional memory mode are carried and change nothing.
+  of the exchange package are zero. The two memory error modes are carried
+  and change nothing.
 - **Not there:** the 100 Mbyte channels of the CPU, and channel parity (the
   error flag of a channel is always zero).
 - **Which blocks the four instruction buffers hold** at a given moment
@@ -519,12 +579,23 @@ and what is not there.
 
 ### The I/O Subsystem
 
-- **An I/O Processor does one instruction after the other.** Each takes the
-  clock periods in which the manual has its result delivered; the real
-  processor can issue an instruction while those before it are still under
-  way. There is no instruction stack: a relative branch of up to 11 octal
-  parcels forward or 13 back counts as inside it, any other branch as
-  leaving it. Local Memory never makes a reference wait.
+- **When an I/O Processor's instructions issue is the manuals' as far as
+  they go.** An instruction issues while those before it are under way if it
+  needs nothing they hold, out of an instruction stack of 32 parcels that is
+  filled ahead of it. The conditions are HR-0030's where it gives them and
+  otherwise those of the manual of the later Models C and D (CSM-1009);
+  that a Model B issues as that manual says is an assumption, and the two
+  Cray texts that give the time of a short run of instructions give the
+  plain sum of the result times. A branch that leaves the stack is charged
+  the 9 clock periods of the manual's listing, which may have been 11. The
+  processor has one port into Local Memory: while an instruction reads or
+  stores there no parcel is read for the stack, which stands in for the
+  real memory's conflicts; the busy time of a memory section is not
+  modelled. A store into a parcel the stack holds is seen and fills the
+  stack again, where the real stack very likely kept the old parcel (the
+  kernel and COS 1.17 never store there).
+  [The specification](spec/iop-cpu-spec.md), part 8, has every rule with
+  its source.
 - **Devices answer as fast as they can** unless the menu's "Device times:
   Real" is chosen ([Device times](#device-times)). Even then the disk on the
   Peripheral Expander has no times of its own, and Buffer Memory and the
@@ -549,8 +620,9 @@ and what is not there.
 - **Not there**, because the software runs without them: the concentrator for
   a front-end computer (the kernel says so once, some seconds after COS has
   been started: `Concentrator ordinal 3  VAX interface select error. Command
-  aborted.`), the error log channel, the block multiplexer channels and with
-  them the tape units of the XIOP, and the clock on the expander.
+  aborted.`), the error log channel, the XIOP with its block multiplexer
+  channels and tape units ([The I/O Subsystem](#the-io-subsystem)), and the
+  clock on the expander.
 
 ### Where the manuals give no answer
 
@@ -580,10 +652,14 @@ Here the core had to choose, and the real machine may do otherwise:
   asked for while it passes counts as caught, so the sectors of a track
   follow each other 0.92 ms apart and one that has just passed takes a
   revolution. HR-0077 has no time for the gap.
-- **The I/O Processor's interrupt and functions.** HR-0030 gives no time for
-  the interrupt sequence; it takes the 9 clock periods of a branch that
-  leaves the instruction stack. A function that sends takes 1 clock period
-  and one that reads 5, after a training workbook (T0201D).
+- **The I/O Processor's interrupt, EXIT and functions.** HR-0030 gives no
+  time for the interrupt sequence or for what follows an EXIT. An interrupt
+  is taken in the clock period the next instruction would issue in, and its
+  handler issues 9 clock periods later, as behind a return jump by a
+  register; the instruction an EXIT leads to issues 7 clock periods behind
+  it. A function that reads has the accumulator in clock period 6 and one
+  that sends holds nothing, after CSM-1009: HR-0030 prints no sequence for
+  them.
 - **The consoles' line speed.** HR-0030 gives none. 9,600 baud is what the
   channels of the later Models C and D are set to by Master Clear
   (CSM-1009-000 page 4-40).
@@ -603,27 +679,35 @@ Here the core had to choose, and the real machine may do otherwise:
 Three clocks, and none is in step with another:
 
 - **The CPU's, 105.263 MHz**: the X-MP's 9.5 ns clock period. The port to
-  DDR3 runs on it.
+  DDR3 runs on it. (A clock of the port's own, six fifths of the CPU's, was
+  tried on a DE10-Nano: it moved a fifth more words through the bridge, but
+  the two crossings between the clocks put five clock periods on every
+  read, and the three memory ports gain nearly as much without it.)
 - **The I/O Subsystem's, 80 MHz**: the 12.5 ns of the I/O Processors' own
   oscillator (HR-0030). The HPS interface, which brings the disks' blocks,
   and the printer's file run on it too.
-- **The video clock, 58.8 MHz**, for the screens, the keyboard and the serial
-  port. A pixel of the 8x16 font is two of its periods (29.4 MHz, 31 kHz
-  lines) and one of the 8x8 font four (14.7 MHz, 15 kHz lines), which is
-  what the MiSTer framework's scandoubler needs. The picture goes out
-  through the framework's `video_mixer` (scandoubler with HQ2x, scanlines,
-  gamma) and `video_freak` (aspect ratio, integer scaling). The PLL of this
+- **The video clock, 58.8 MHz**, for the screens, the keyboard and the
+  station's serial line. A pixel of the 8x16 font is two of its periods (29.4 MHz, 31 kHz
+  lines) and one of the 8x8 font four (14.7 MHz, 15 kHz lines). The picture
+  goes out through the framework's `video_mixer` (gamma) and `video_freak`
+  (aspect ratio, integer scaling). The PLL of this
   clock has whole-number dividers; only the CPU's has a fractional one, and
   nothing of the picture runs on that.
 
   The 8x8 font is the one the core starts with. Its raster is 262 lines at
-  15.71 kHz and 59.94 Hz, which a 15 kHz screen takes as it is and the
-  scandoubler doubles for others; the menu is drawn into the picture, so a
-  core that started with the other font could not be set right on a 15 kHz
-  screen. The 8x16 font's raster is 524 lines at 31.41 kHz, of which 400 are
-  shown: the line and frame rates of VGA's 640x480. The analog output
-  carries the core's own raster in both cases; `vga_scaler=1` in `MiSTer.ini`
-  puts the scaler's picture there instead.
+  15.71 kHz and 59.94 Hz, which a 15 kHz screen takes as it is; the menu is
+  drawn into the picture, so a core that started with the other font could
+  not be set right on a 15 kHz screen. The 8x16 font's raster is 524 lines
+  at 31.41 kHz, of which 400 are shown: the line and frame rates of VGA's
+  640x480. The analog output carries the core's own raster in both cases;
+  `vga_scaler=1` in `MiSTer.ini` puts the scaler's picture there instead.
+
+  The mixer's scandoubler is not used. It would double the 8x8 font's lines
+  to the rates the 8x16 font's raster has anyway, and it took 26 of the
+  chip's memory blocks to do it. A screen that needs 31 kHz lines gets the
+  8x16 font instead: with `forced_scandoubler=1` in `MiSTer.ini` the core
+  shows that font from its start, whatever the menu says, and the menu's
+  Font is greyed out. Direct video carries whichever raster the core makes.
 
 The CPU and the I/O Subsystem are two cabinets with an oscillator each on the
 real machine, and they meet here as they do there, through signals that do
@@ -700,6 +784,17 @@ took the CPU from there to the X-MP's clock:
 - The I/O Subsystem is off the CPU's clock. An I/O Processor also stores a
   result in Local Memory a clock after forming it, so that the way from
   Local Memory through its adder does not lead back into a memory.
+- A request of the CPU stands in a register on its way to the port to
+  DDR3, with room for one more behind it (`cray_mem_mux`), so that neither
+  the memory ports nor the port to DDR3 wait for the other within a clock.
+  A request is taken when the place behind is free, which is known as the
+  clock begins. The instruction buffers say a clock ahead what they are
+  going to read, for either half of a buffer, and lose no clock to the
+  register when nothing else is asked for; a scalar reference with nothing
+  in front of it goes past its queue.
+- Where P, the fetch address and the buffers' address registers go if the
+  current instruction issues is formed beside the decision, which then only
+  picks between that and staying.
 
 COS keeps its own time of day by counting the CPU's clock periods as an
 X-MP's, and the station's clock is the I/O Subsystem's, in real milliseconds.
@@ -721,8 +816,32 @@ channel into central memory, the Buffer Memory channels, the tape drive and
 the copy of the kernel; they take turns. Requests go to the DDR3 in the
 order they are taken, several of them on their way at once, and the words
 of reads come back in that order: the CPU presents a request a clock, the
-others hold each request until its acknowledge. The Local Memories of the
-I/O Processors are block memory in the FPGA.
+others hold each request until its acknowledge. A request goes to the
+bridge in the clock it is taken when nothing is in its way, and a word read
+is handed on as the bridge gives it. The Local Memories of the I/O
+Processors are block memory in the FPGA.
+
+The port keeps lines of code. A read of a whole 16-word line by the
+instruction buffers leaves the line in block memory as its words go by,
+1,024 lines at most, each in the place the low ten bits of its number
+name. When the buffers read that line again the words come from there, one
+a clock, and the DDR3 is not asked. A write into a line that is kept puts
+it out, whoever writes, and a line is not kept if a write went to it while
+it was on its way in, so a kept line is always what the DDR3 holds. Only
+the instruction buffers are answered this way: a word a program loads, and
+the words of a block or vector transfer, always come from the DDR3. What a
+tool on the MiSTer's Linux writes into the machine's memory by itself does
+not reach the kept lines; the menu's reset clears them.
+
+Two other ways of getting more out of the DDR3 were tried on a DE10-Nano
+and are not in the core. Holding writes back so that reads go to the bridge
+first, and sending the writes together, changes nothing where a program
+stores and loads different words (the bridge charges about three clock
+periods for a store with a load behind it either way) and costs where it
+loads a word it has just stored. And two loads of words that lie apart,
+one behind the other, take about five clock periods longer than one, with
+no store anywhere: that is the bridge's, and only words read in one piece,
+as the transfers and the instruction buffers read them, get past it.
 
 DDR3 keeps its contents when a core is loaded, so central memory and Buffer
 Memory are filled with zeros the first time after the core has been loaded,
@@ -735,13 +854,26 @@ restart of the real machine does.
 
 An instruction buffer holds 32 words, as on the X-MP, and fills with two
 16-word reads: first the half with the parcel that is wanted, which runs as
-soon as it is in, then the other half. A block or vector load issues its
-reads without waiting for their words, up to eight of them ahead; stepping
-by 1 to 7 words it reads the elements that lie in a 16-word line as one
-request, from the first of them to the last, and picks them out as the
-words go by. A block or vector store reads its register a word a clock and
-hands the words to memory as it takes them. Scalar references are presented
-to memory one behind the other, in the order they issued.
+soon as it is in, then the other half.
+
+The CPU's block and vector transfers go through the X-MP's three memory
+ports (HR-0097B pages 29 to 31, 148, 200 and 201), each a transfer
+sequencer of its own (`rtl/cray/mem_xfer.v`) with a request stream of its
+own into the memory multiplexer: a vector load takes port B, or port A
+when B is busy; 034 port A and 036 port B; a vector store, 035 and 037
+port C. A read and a write run at the same time only with the
+bidirectional memory mode set (0026; 0025 clears it), as on the X-MP, which
+leaves the order of a block read and a block write of the same words to the
+program: with the mode clear, a load holds while port C is busy and a store
+while port A or B is. Scalar references hold while any port is busy, and no
+transfer starts while a scalar reference is waiting, so that the references
+of a program reach memory in the order they issued. A block or vector load
+issues its reads without waiting for their words, up to eight of them
+ahead; stepping by 1 to 7 words it reads the elements that lie in a
+16-word line as one request, from the first of them to the last, and picks
+them out as the words go by. A block or vector store reads its register a
+word a clock and hands the words to memory as it takes them. Scalar
+references are presented to memory one behind the other.
 
 No memory instruction waits for memory to issue. A scalar reference issues
 as soon as both its parcels are there; its address is formed and checked
@@ -794,10 +926,11 @@ The I/O Subsystem and the core:
   software and COS 1.17: dead start, station, start-up, a batch job whose log
   equals the one that comes with the software.
 - The I/O Processor follows the model step by step through the kernel's boot,
-  318 million steps on the three processors, and through 4,400 random
-  programs: same interrupts, same channel functions, same registers, same
-  clock periods.
-- The three processors and their devices boot the kernel in simulation, and a
+  221 million steps on the two processors, and through 4,200 random
+  programs, among them short loops, branches of every distance and stores
+  into the program itself: same interrupts, same channel functions, same
+  registers, and every step issued in the same clock period.
+- The two processors and their devices boot the kernel in simulation, and a
   self-checking program covers what the kernel's start does not use.
 - The whole machine, and the core around it with stand-ins for the MiSTer
   framework, load and start COS in simulation; in the longest run COS reads
@@ -848,7 +981,8 @@ The I/O Subsystem and the core:
   HDMI picture show both fonts, the four aspect ratios (the two custom ones
   at 16:10 and 1:1), the three integer scales, and the 8x8 font doubled with
   scanlines. With HQ2x a line comes out 1,024 pixels wide where 1,280 are
-  expected, with the text whole; that has not been looked into. With direct
+  expected, with the text whole; that has not been looked into. (The
+  scandoubler, its scanlines and HQ2x have since been taken out.) With direct
   video a RetroTINK 4K reports the 8x16 font's picture as 1872x524p
   (1280x384) at 58.80 MHz, 31.41 kHz and 59.94 Hz. The analog output has not
   been tried on a screen.
@@ -912,24 +1046,47 @@ The I/O Subsystem and the core:
   loops whose clock periods are under
   [Differences](#differences-from-a-real-x-mp) were assembled, linked and
   run there as jobs, and timed by the CPU time COS charges them.
+- What was changed after the release of 25 October 2026 has run on a
+  DE10-Nano with the build [Resources](#resources) gives the numbers of:
+  two I/O Processors where there were three, two channel pairs where there
+  were four, a parcel of Local Memory kept as fifteen bits and one, the
+  multiplier as a whole product less its corner, the scandoubler taken out,
+  the station's serial line, the three memory ports, the lines of code the
+  port to DDR3 keeps, and the I/O Processor's instruction stack with
+  instructions issuing as the manuals have them. The kernel booted from
+  the new boot file, COS started, and the benchmark's job
+  (`tools/py/bench.py`) ran: 26 kernels whose sums were all the reference
+  model's, and COS's own assembler and loader in front of them. With a
+  build of an earlier state of these changes a statement sent over the
+  station's line was typed at the station and its display came back over
+  the line. In simulation the CPU's tests, 200,000 vectors for each kind
+  of multiply, the port to DDR3 by itself and 4,200 random programs of the
+  I/O Processor agree with the models, and the core as a whole starts COS,
+  logs the station on, is reset under a running CPU and reads a tape.
 
 ## Resources
 
-Quartus 17.0 for the DE10-Nano: 36,529 ALMs (87%), 547 of 553 memory blocks,
-38 DSP blocks, 5 of 6 PLLs. Of the memory blocks the Local Memories of the
-three I/O Processors take 384, the framework's scaler, scandoubler and menu
-83, the screens with their fonts 30, the disk drives' buffers 20 and the
-CPU's vector registers 16.
+Quartus 17.0 for the DE10-Nano, the build that is
+`releases/Cray-XMP_20261126.rbf`: 36,078 ALMs (86%), 475 of 553 memory blocks,
+47 DSP blocks, 5 of 6 PLLs. Of the memory blocks the Local Memories of the
+two I/O Processors take 210, the lines of code the port to DDR3 keeps 129,
+the framework's scaler, menus and shadow mask 55, the screens with their
+fonts 30, the CPU 25 (its vector registers 16 of them) and the disk drives'
+buffers 20. Of the DSP blocks the framework has 33 and the CPU 13, seven of
+them the floating-point multiplier.
 
-Timing is met for the CPU's 9.5 ns with 0.08 ns to spare, for the I/O
-Subsystem at 80 MHz with 0.76 and for the video side at 58.8 MHz with 3.9;
-the framework's HDMI clock is missed by 0.04 ns, in its scaler, which some
-builds of these sources meet and others miss by about that much. COS
-starts, the station logs on, and the eight memory loops and the FORTRAN
-job run on a DE10-Nano with this build. With the device this full, whether
-the design fits at all and how each clock comes out hang on where the
-fitter starts (`SEED` in `Cray-XMP.qsf`): for these sources seed 13, the
-one set, meets the CPU's clock, seeds 1, 2 and 3 missed it by 0.4 to 0.6
-ns, and one seed in twelve did not fit. The fitter's own effort options
-(aggressive routability, maximum router timing effort, a doubled placement
-effort) made the misses larger, not smaller, and are not set.
+Timing is met for the CPU's 9.5 ns with 0.06 ns to spare, for the I/O
+Subsystem at 80 MHz with 1.5 and for the video side at 58.8 MHz with 5.7;
+the framework's HDMI clock is missed by 0.09 ns, in its scaler, which some
+builds of these sources meet and others miss by up to 0.6. COS starts and
+the benchmark's job runs on a DE10-Nano with this build and the files of
+the package beside it in `releases`. With the device this full, how each
+clock comes out hangs on where the fitter starts
+(`SEED` in `Cray-XMP.qsf`): of fourteen seeds for these sources seed 1,
+the one set, meets the CPU's clock, seed 60 missed it by 0.005 ns and the
+other twelve by 0.2 to 1.2 ns; all fourteen fit and meet the I/O
+Subsystem's clock. The fitter's own effort options (aggressive
+routability, maximum router timing effort, a doubled placement effort)
+made the misses larger, not smaller, and are not set; a clock period
+shortened for the fitter alone and synthesis balanced between speed and
+area changed nothing for the better either.

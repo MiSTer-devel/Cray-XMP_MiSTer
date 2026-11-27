@@ -2,7 +2,7 @@
 //! `sim/build/iop/Viop_cpu` to check the hardware description against.
 //!
 //! ```text
-//! iop_random SEED STEPS noise|work FILE
+//! iop_random SEED STEPS noise|work|loops FILE
 //! iop_random directed FILE
 //! ```
 //!
@@ -34,17 +34,24 @@ fn main() -> std::process::ExitCode {
         let mix = match mix.as_str() {
             "noise" => Mix::Noise,
             "work" => Mix::Work,
+            "loops" => Mix::Loops,
             _ => return None,
         };
         Some((seed.parse().ok()?, steps.parse().ok()?, mix, file))
     })();
     let Some((seed, steps, mix, file)) = parsed else {
-        eprintln!("usage: iop_random SEED STEPS noise|work FILE\n       iop_random directed FILE");
+        eprintln!(
+            "usage: iop_random SEED STEPS noise|work|loops FILE\n       iop_random directed FILE"
+        );
         return 64.into();
     };
     match std::fs::File::create(file) {
         Ok(out) => {
-            random(seed, steps, mix, Box::new(std::io::BufWriter::new(out)));
+            let c = random(seed, steps, mix, Box::new(std::io::BufWriter::new(out)));
+            println!(
+                "{} instructions, {} interrupts; branches taken in the instruction stack {}, fills of the stack {}; stores into it: {} by the processor, {} by a channel",
+                c.instructions, c.interrupts, c.in_stack, c.out_of_stack, c.stack_stores, c.stack_device_stores
+            );
             0.into()
         }
         Err(e) => {

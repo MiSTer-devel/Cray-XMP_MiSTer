@@ -3,7 +3,8 @@
 // The menu loads the file into DDR3 (tools/py/mkboot.py makes it); in 64-bit
 // words, the first byte of the file being the high byte of word 0:
 //
-//   word 0         "XMPBOOT1"
+//   word 0         "XMPBOOT2" (a file that says XMPBOOT1 holds the software for
+//                  three I/O Processors, which waits for the third for ever)
 //   word 1         the length of the kernel in bytes
 //   word 2         the length of the boot tape in bytes
 //   word 3         the check sum of all words from word 8 on
@@ -49,7 +50,7 @@ module xmp_boot #(
 	output wire [24:0] o_tape         // where the tape is in memory, in words
 );
 
-	localparam [63:0] MAGIC  = "XMPBOOT1";
+	localparam [63:0] MAGIC  = "XMPBOOT2";
 	localparam [24:0] KERNEL = 25'd8;       // words before the kernel
 	localparam [24:0] MEMORY = 25'd16384;   // words of a Local Memory
 
@@ -64,14 +65,21 @@ module xmp_boot #(
 	localparam B_CLEAR = 3'd6;  // zeros into the memories below the file
 
 	reg [ 2:0] b;
-	reg        gap;  // the clock after an acknowledge, with no request
+	// A word is looked at in the clock after its acknowledge, out of a
+	// register: in that clock nothing is asked for.
+	reg        got;
+	reg [63:0] word;
+	always @(posedge clk) begin
+		got  <= i_ack && !reset;
+		word <= i_rdata;
+	end
 	reg        fresh = 1'b1;  // the core has just been loaded: the memories hold whatever was there
 	reg [23:0] c;
 	reg [21:0] n, words;
 	reg [63:0] sum, want;
 
 	// the words of the tape, and with the kernel's
-	wire [21:0] tape_words = {1'b0, i_rdata[23:3]} + {21'd0, |i_rdata[2:0]};
+	wire [21:0] tape_words = {1'b0, word[23:3]} + {21'd0, |word[2:0]};
 
 	task read;
 		input [24:0] a;
@@ -85,35 +93,32 @@ module xmp_boot #(
 	always @(posedge clk) begin
 		if (reset) begin
 			b         <= B_MAGIC;
-			gap       <= 1'b0;
 			o_req     <= 1'b0;
 			o_we      <= 1'b0;
 			o_done    <= 1'b0;
 			o_missing <= 1'b0;
-		end else if (gap) gap <= 1'b0;
-		else if (i_ack) begin
-			o_req <= 1'b0;
-			gap   <= 1'b1;
+		end else if (i_ack) o_req <= 1'b0;
+		else if (got) begin
 			case (b)
 				B_MAGIC: begin
 					b <= B_TAPE;
-					if (i_rdata != MAGIC) begin
+					if (word != MAGIC) begin
 						o_missing <= 1'b1;
 						b         <= B_STOP;
 					end
 				end
 				B_TAPE: begin
-					o_tape_bytes <= i_rdata[23:0];
+					o_tape_bytes <= word[23:0];
 					words        <= tape_words + MEMORY[21:0];
 					b            <= B_SUM;
 					// a length that is not a tape's: the file is not ours
-					if (i_rdata[63:24] != 40'd0) begin
+					if (word[63:24] != 40'd0) begin
 						o_missing <= 1'b1;
 						b         <= B_STOP;
 					end
 				end
 				B_SUM: begin
-					want <= i_rdata;
+					want <= word;
 					sum  <= 64'd0;
 					n    <= 22'd0;
 					c    <= 24'd0;
@@ -127,8 +132,8 @@ module xmp_boot #(
 					end
 				end
 				B_GET: begin
-					sum     <= {sum[62:0], sum[63]} + i_rdata;
-					o_wdata <= i_rdata;
+					sum     <= {sum[62:0], sum[63]} + word;
+					o_wdata <= word;
 					b       <= (n < MEMORY[21:0]) ? B_PUT : B_GET;
 					if (n >= MEMORY[21:0]) n <= n + 22'd1;
 				end

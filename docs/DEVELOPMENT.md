@@ -11,14 +11,14 @@ is made of and where it differs from a real one, see [MACHINE.md](MACHINE.md).
 - `rtl/cray/`: CPU modules written for this core.
 - `rtl/cray/cray-1x/`: CPU modules that started in the cray-1x project. That
   project is no longer maintained, so they are maintained here like the rest.
-- `rtl/ios/`: the I/O Subsystem. Three I/O Processors with their Local
+- `rtl/ios/`: the I/O Subsystem. Two I/O Processors with their Local
   Memories, clocks, Buffer Memory channels and the channels between them; the
   consoles; the Peripheral Expander with its tape, disk and printer; the
   BIOP's disk drives and its channel into central memory; the MIOP's channel
   pair to the mainframe.
 - `rtl/mister/`: what joins the machine to the MiSTer. The DDR3 port and its
-  sharing, the check and copy of the boot file, the consoles on the serial
-  port, the printer's file, clock domain crossings.
+  sharing, the check and copy of the boot file, the consoles' plumbing with
+  the station's serial line, the printer's file, clock domain crossings.
 - `rtl/terminal/`: the screens, the keyboard and the video.
 - `sys/`: the MiSTer framework, an unmodified copy of
   [Template_MiSTer at `5dda373`](https://github.com/MiSTer-devel/Template_MiSTer/tree/5dda37366d02b04b8448da7b322235c1831af811/sys).
@@ -99,7 +99,7 @@ clock, and stops if one decides a branch, an address or console output.
 ### The system model
 
 `cray-xmp-sys` joins that CPU model to a model of the
-I/O Subsystem: three I/O Processors with their channels, Buffer Memory, the
+I/O Subsystem: its I/O Processors with their channels, Buffer Memory, the
 Peripheral Expander with its tape, disk and printer, nine DD-29 disk drives,
 the consoles, and the two links to the mainframe. It runs the I/O Subsystem's
 own software, and through it COS 1.17. The hardware description was written
@@ -121,6 +121,18 @@ is copied to the terminal; a `screen` step prints a console as the 24 lines
 an operator would see. `--log FILE` writes every channel function of every
 I/O Processor. The header of `tools/crates/ios/src/bin/cray-xmp-sys.rs` lists
 the script steps and the options, among them the timing of the devices.
+
+The model's I/O Subsystem is the core's: the MIOP and the BIOP. The COS 1.17
+software was recovered configured for a third I/O Processor, the XIOP, and
+waits for it for ever, so six parcels of its boot tape are changed to say
+there are two ([docs/MACHINE.md](MACHINE.md#the-io-subsystem)). The table of
+the six is `TWO_IOPS`, and it is in three places that each change the tape
+on its way in and leave the file alone: the model
+(`tools/crates/ios/src/system.rs`), `tools/py/mkboot.py` for the boot file,
+and `sim/harness/ios_media.h` for the simulations that are given the tape
+itself. A tape that is not that software's is left as it is. `cray-xmp-sys
+--three-iops` runs the I/O Subsystem the software came with, XIOP and all,
+on the tape as it is.
 
 ### A program without COS
 
@@ -202,11 +214,13 @@ sim/build/core/Vemu BOOTFILE --disk 0=exp_disk.img --until 'ENTER DATE'
 - `Vcray_cpu` is the CPU with a memory model of four million words, and with
   each output channel cabled to the input channel of its pair. `--mem` picks
   the memory timing: `0`, `fixed:N`, `rand:A-B`, `mister` (the DE10-Nano's
-  DDR3 as measured under COS: a word about 16 clocks after its read), `ddr3`
-  or `slow`. `--step` holds each instruction until the one before has
+  DDR3 as the benchmark's kernels measure it under COS: a word about 16
+  clocks after its read, writes in a row at five in six clocks, and a read
+  behind a write 19 clocks later), `ddr3` or `slow`. `--step` holds each instruction until the one before has
   finished. `tools/py/membench.py` runs the memory loops of `tests/cos` on
   it (`tests/bench/membench.cal`) and prints the clock periods each takes
-  for an element, for one or more `--mem` profiles.
+  for an element, for one or more `--mem` profiles;
+  [the benchmark](#the-benchmark) has those loops among its kernels.
 - `Vfp_tb` checks the floating-point units against vector files.
 - `sim/build/iop/Viop_cpu RECORD` is the I/O Processor following a record of
   the reference model's steps; `tools/py/ioptest.py` makes the records.
@@ -222,15 +236,23 @@ sim/build/core/Vemu BOOTFILE --disk 0=exp_disk.img --until 'ENTER DATE'
   BIOP's test of its drives.
 - `sim/build/core/Vemu` is the core as the MiSTer runs it (`Cray-XMP.sv`), with
   stand-ins for `hps_io`, the PLL, DDR3 and the framework's `video_mixer` and
-  `video_freak`, which pass the picture through. It loads a boot file into memory
-  that is otherwise full of junk, serves the image slots, types on the serial
-  port (`--type`) or on the keyboard (`--press`, with `{f1}` to `{f3}`), reads
-  the serial port and the video, presses the menu's reset, and at the end
-  compares the screens in the core with what the serial port carried. Run it
+  `video_freak`, which pass the picture through. The DDR3 stand-in answers
+  a read about 15 clock periods after it is taken, as the DE10-Nano does; `--ddr quick` makes it faster,
+  `--ddr slow` slower and more fitful, `--ddr fast` immediate. It loads a boot file into memory
+  that is otherwise full of junk, serves the image slots, types on the
+  keyboard (`--type` for a console, `--press` with `{f1}` to `{f3}` as they
+  come), reads what the consoles are sent where the core hands a character
+  to a screen, reads the video, presses the menu's reset, and at the end
+  compares the screens in the core with what the consoles were sent. With
+  `--serial` it is also a listener on the station's serial line, sends bytes
+  there (`--send`) and checks that the line carried what the station was
+  sent. Run it
   from the top of the source tree; the header of `sim/harness/core_main.cpp`
   lists the options.
 - `sim/build/ampex/Vterm_ampex_tb` and `sim/build/spool/Vprint_spool` are the
-  benches of the terminal and of the printer's file.
+  benches of the terminal and of the printer's file, and
+  `sim/build/ddr3/Vddr3_ports_tb` that of the port to DDR3 (a second one in
+  `sim/build/ddr3_0` has the port without the lines it keeps).
 
 The model's terminal is itself checked against the firmware of the real one.
 `tools/py/d80emu.py` runs the program ROMs of the Ampex Dialogue 80 on a
@@ -288,7 +310,8 @@ time, and a second random seed. All five must agree with the model.
   gather, the scatter and the compress index; `vfar.cal`, vector
   transfers with long steps that leave a user's field; `vedge.cal`, vector
   loads with every small step that run off the end of a field (written by
-  `gen_vedge.py`); `together.cal`,
+  `gen_vedge.py`); `bdm.cal`, the three memory ports and the bidirectional
+  memory mode; `together.cal`,
   results of several units that are due in one clock period; `memq.cal`,
   memory references that go on behind the instructions that follow them;
   and `memrange.cal`, the operand range error of such a reference with
@@ -297,8 +320,9 @@ time, and a second random seed. All five must agree with the model.
   cannot predict: the real-time clock, the programmable clock and its
   interrupt, the console interrupt, and how many clock periods instructions
   take (`timing.cal`, and `timing_esvl.cal` with the second vector logical
-  unit enabled, both written by `gen_timing.py`). They run on the RTL
-  alone. A line `* NOSTEP` keeps a program out of the run that holds issue
+  unit enabled, both written by `gen_timing.py`), and that a jump to code
+  in no instruction buffer is never sooner there than on the X-MP
+  (`fetch.cal`). They run on the RTL alone. A line `* NOSTEP` keeps a program out of the run that holds issue
   to one instruction at a time. A line
   `* SIM: arguments` in such a program gives the simulator more arguments;
   `--ctrl-c 30000,400000` makes the console ask for its interrupt in those
@@ -309,6 +333,10 @@ time, and a second random seed. All five must agree with the model.
   seeds and keeps failing cases in `build/diff`. With `--chain` the programs
   are mostly vector instructions on a few V registers, so that operations
   take their operands from results, loads and stores still on their way.
+  They never enable the bidirectional memory mode: with it on, a block read
+  and a block write of the same words run together and the X-MP leaves
+  their order to the program (HR-0097B page 31), which the model cannot
+  predict.
 - `tests/fp/xmp_ref.vec` holds 79 floating-point cases whose results come from
   the cray-sim project's test program.
 
@@ -320,32 +348,36 @@ The smoke tests cover exits, exchanges and range errors.
 
 `rtl/ios/iop_cpu.v` is checked against the model `tools/crates/ios/src/iop.rs`
 step by step. The model runs a program and writes a record: Local Memory,
-then for every instruction or interrupt what its channels answered and what
-the registers held afterwards (`replay.rs` has the format). The simulation
-is given the same memory and the same answers, and must take the same
-interrupts, send the same functions, end every step with the same registers
-after the same number of clock periods, and finish with the same memory,
-operand registers and exit stack.
+then for every instruction or interrupt what its channels answered, what
+the registers held afterwards and how many clock periods behind the step
+before it issued (`replay.rs` has the format). The simulation is given the
+same memory and the same answers, and must take the same interrupts, send
+the same functions, issue every step in the same clock period with the same
+registers behind it, and finish with the same memory, operand registers and
+exit stack.
 
 ```sh
-python3 tools/py/ioptest.py rand 1 200     # random programs, two kinds, and a directed one
-python3 tools/py/ioptest.py kernel         # the real kernel's boot on each of the three processors
+python3 tools/py/ioptest.py rand 1 200     # random programs, three kinds, and a directed one
+python3 tools/py/ioptest.py kernel         # the real kernel's boot on each of the two processors
 ```
 
-- A random program is either all random parcels, which reaches every
-  operation code, or mostly register work with functions on the processor's
-  own channels and frequent interrupts. Half way through each there is a
+- A random program is all random parcels, which reaches every operation
+  code, or mostly register work with functions on the processor's own
+  channels and frequent interrupts, or one that stays in 256 parcels: loops,
+  branches of up to 45 parcels either way, and stores of the program and of
+  the channels into its own parcels. Half way through each there is a
   Master Clear and a second dead start.
 - `kernel` needs the COS 1.17 software (see "The system model"). The system
-  model boots it and the simulation follows one processor: 150 million steps
-  for the MIOP, 55 million each for the other two.
-- `python3 tools/py/ioptest.py boot` runs the three processors together as
+  model boots it and the simulation follows one processor: 138 million steps
+  for the MIOP, 83 million for the BIOP.
+- `python3 tools/py/ioptest.py boot` runs the two processors together as
   hardware, each with its Local Memory, real-time clock, Buffer Memory channel,
-  its channels to the others and its console, and the MIOP with its
+  its channels to other processors and its console, and the MIOP with its
   Peripheral Expander. The MIOP is dead started from Buffer Memory, loads its
-  overlays from the tape, dead starts the BIOP and the XIOP and asks for the
-  date and the time, which the test types; the BIOP and the XIOP say who they
-  are on their own consoles. The test then types `FSTAT`, and the kernel
+  overlays from the tape, dead starts the BIOP and asks for the date and the
+  time, which the test types; the BIOP says who it is on its own console, and
+  the kernel's list of its channels must name no third processor. The test
+  then types `FSTAT`, and the kernel
   lists the files on the expander disk as the system model lists them.
   Meanwhile the BIOP runs its own test of its nine drives and must have
   nothing to report.
@@ -362,7 +394,7 @@ python3 tools/py/ioptest.py kernel         # the real kernel's boot on each of t
   depend on: the real-time clock, the order in which channels that ask for an
   interrupt are reported, the expander's tape and disk, a drive of the BIOP
   and its channel into central memory, that a word from each processor
-  reaches each other one, and the printer. Each processor writes its verdict
+  reaches the other, and the printer. Each processor writes its verdict
   on its console, and what was printed must be the same on both. A second
   run is on the whole machine: the program puts a few instructions into
   central memory, lets the CPU go, exchanges parcels with it over the channel
@@ -389,7 +421,7 @@ python3 tools/py/ioptest.py kernel         # the real kernel's boot on each of t
 
 ### The core
 
-`tools/py/coretest.py` runs the core-level simulation and the two benches
+`tools/py/coretest.py` runs the core-level simulation and the three benches
 beside it.
 
 - `screens`: the consoles' terminal (`rtl/terminal/term_ampex.v`) against the
@@ -400,18 +432,143 @@ beside it.
   along each stream and at its end.
 - `spool`: the printer's file. Random printing into files of random lengths,
   part of them used by an earlier session, and what the files hold afterwards.
+- `ddr3`: the port to DDR3 (`rtl/mister/ddr3_ports.sv`) by itself, with
+  lines of code kept and without. Five users read and write as the core's
+  do, most of it in a small window of memory so that lines read before are
+  read again and written into, through a bridge whose times are drawn for
+  each case.
+  Every word read has to be what the requests taken before it left there,
+  the words have to come in order to the user that asked, and at the end the
+  memory has to hold what was written; one user is reset now and then.
 - `nofile`: the core without a boot file says so on the screen.
 - `printer`: the self-checking program as the boot file. It reports on the
   operator's console, and what it prints is on the printer's screen and in
   the printer's file.
 - `boot`: the kernel boots from a boot file; date and time are typed on the
   keyboard; the menu's reset makes it boot again.
-- `start`: COS is loaded and started, and the station is logged on from the
-  keyboard after F2.
+- `start`: COS is loaded and started, and the station is logged on after
+  F2 with half of `LOGON` typed on the keyboard and half sent over the
+  station's serial line, which has a listener in this run: the line has to
+  carry what the station was sent.
 - `restart`: the menu's reset while the CPU runs. The kernel comes up again
   and the CPU waits for it.
 
 Every run fails if the CPU runs before `START` has been typed.
+
+## The benchmark
+
+`tools/py/bench.py` times 26 kernels, each a loop in assembly language
+around one thing the machine does, and says for each how many clock periods
+one unit of its work takes: an element of a loop, a call, a number sorted.
+A smaller number is the faster machine. The clock periods are counted by the
+machine's own real-time clock, read before and after the kernel, so the
+number means the same in the CPU simulation and on a MiSTer.
+
+```sh
+python3 tools/py/bench.py list                        # the kernels and what each is about
+python3 tools/py/bench.py sim --save before.json      # in the CPU simulation, a few seconds
+python3 tools/py/bench.py sim --against before.json   # after a change: beside it, with the change in percent
+python3 tools/py/bench.py sim --mem mister --mem 0    # a column for each memory timing
+python3 tools/py/bench.py mister --save now.json      # on a MiSTer, as a job under COS: five minutes
+python3 tools/py/bench.py compare before.json now.json
+```
+
+- **The kernels** are in `tests/bench/xbench.cal`, whose first lines have
+  the rules for writing one. The groups: `scalar` works in the A and S
+  registers; `fetch` calls routines that are and are not in the instruction
+  buffers; `smem` loads and stores single words, among them a sieve and a
+  sort; `vreg` is vector work in registers; `vmem` moves vectors to and
+  from memory in every way the machine has; `vfp` is three floating-point
+  loops over arrays, the first Livermore loop among them.
+- **A kernel that computes something else is not timed.** Each leaves a sum
+  of everything it computed. The reference model runs the program first, and
+  a run in which a sum differs from the model's stops and names the kernel.
+  `make test-quick` runs the benchmark for that reason.
+- **Each kernel starts at the beginning of an instruction buffer** and is
+  shorter than one, in the simulation and under COS alike, so adding a
+  kernel or changing one does not move the times of the others.
+- **In the simulation** (`sim`) the program runs on `Vcray_cpu` with the
+  memory timing of `--mem`: `mister` unless given. `0` is memory that
+  answers in the next clock, which shows how much of a time is memory's.
+  The same sources give the same numbers every time. Under `mister` a
+  change to the CPU can move a time by a few tenths of a percent without
+  meaning to, because the profile's rare stalls fall elsewhere; `fixed:16`
+  has none.
+- **On a MiSTer** (`mister`) the same kernels are a job for COS: its
+  assembler on the drive assembles them, and the program writes a line for
+  each time into the job's log. The script copies `exp_disk.img` to
+  `bench_disk.img` beside it on the card and puts the job there as
+  `STATION/JXBENCH`, starts the core with that disk, dead starts COS as the
+  README's steps do, submits the job and reads `printer.txt`. It types on a
+  keyboard it gives the MiSTer, with waits that leave room for each answer,
+  since nothing tells it what the consoles show; if COS does not get as far
+  as the job, the run ends with nothing printed and says so. It needs what
+  `hil.py` needs, and it runs the core that is on the MiSTer: `hil.py
+  deploy` first for a new one. `--running` submits the job to a core that
+  already runs COS from `bench_disk.img`.
+- **The fastest of five times counts** for each kernel on a MiSTer. COS's
+  interrupts are in the others, and so is whatever the MiSTer's Linux did
+  in memory meanwhile. The machine's memory is a region of its own, from
+  `0x30000000`, above the 511 MB Linux is given, so nothing of Linux's is
+  ever in it; but it is the one DDR3 chip behind the one controller, which
+  serves Linux, the video scaler and the core in turn. Reading
+  `printer.txt` over SSH every five seconds put up to a tenth on the time
+  of a kernel that uses memory, and less than a hundredth on one that does
+  not, so the script asks nothing of the MiSTer while the job runs. Two
+  runs of the same core then differ by less than a hundredth in a kernel
+  and by less than a thousandth in the mean.
+- **`CAL` and `LDR`**, behind the mean, are the two steps of the job that
+  make the program: COS's assembler and loader, programs compiled from C,
+  at work on the kernels' 1,230 lines, with their requests to COS and their
+  reads and writes of the drive. Their time is what COS charged them, in
+  clock periods a line. They are only there on a MiSTer, and they change
+  when the kernels' source does.
+- **By hand:** `bench.py job` writes the job to `build/bench/JXBENCH.txt`
+  and says how to put it on an expander disk; `SUBMIT,JXBENCH` at the
+  station runs it, and `bench.py read printer.txt --last` reads the times
+  out of what it printed.
+- **`bench.py model`** runs the job under COS on the system model, from the
+  package in `releases`: a check, in a minute and a half and without a
+  MiSTer, that COS's assembler takes the kernels as they are now and that
+  they compute what they should. Its times mean nothing, an instruction
+  being four clock periods there.
+
+`tests/bench/release-20261025.json` has the core of that release: the
+simulation with `mister` and with `0`, and a DE10-Nano (`hardware`).
+`--against` it shows where a build stands:
+
+```sh
+python3 tools/py/bench.py sim --mem mister --mem 0 --against tests/bench/release-20261025.json
+```
+
+For that release the kernels that stay in registers take the same clock
+periods on a DE10-Nano as in the simulation, to a third of a percent, which
+is COS's interrupts: the empty loop 13.05 for 13.00, the vector add 1.13 an
+element in both. The simulation's `mister` memory was set by the others:
+with it their times are within 6% of the DE10-Nano's and the mean of all 26
+is 10.95 for the DE10-Nano's 10.93. Before, the simulation took no account
+of what a write costs the DDR3, and the kernels that store were up to 15%
+too fast in it. With memory that answers at once the mean is 9.05: a sixth
+of the average kernel's time is the DDR3's, and about two fifths of it for
+the loops of scalar loads and stores and for calls outside the instruction
+buffers.
+
+`tests/bench/build-20261126.json` has the same three for the sources with
+the three memory ports, the lines of code the port to DDR3 keeps and the
+I/O Processor's instruction stack, the DE10-Nano's from the build whose
+numbers are in [MACHINE.md](MACHINE.md#resources):
+
+```sh
+python3 tools/py/bench.py compare tests/bench/release-20261025.json tests/bench/build-20261126.json hardware
+```
+
+On the DE10-Nano the mean of the 26 went from 10.93 to 10.11. What stays
+in registers and the scalar loads and stores take what they took; a call
+outside the instruction buffers 56.4 for 84.6, the vector copy 3.09 an
+element for 4.27, the scatter 3.04 for 4.37, SAXPY 2.68 for 4.27, and
+COS's assembler and loader 2.6% less. The simulation's `mister` memory
+knows nothing of the lines kept, so a call outside the buffers still takes
+86.5 there.
 
 ## Files on the expander disk
 
@@ -590,38 +747,65 @@ card on the MiSTer once.
 
 ```sh
 python3 tools/py/hil.py deploy                  # copy the core
-python3 tools/py/hil.py start cos117.ios -t 60 \
-    --type 'ENTER DATE [MM/DD/YY]=10/05/89\r' \
-    --type 'ENTER TIME [HH:MM:SS]=01:02:03\r' \
-    --type '10/05/89  01:02:03=START COS_117 DEADSTART\r' \
-    --until 'START COMPLETE'
-python3 tools/py/hil.py session -t 20 --type '+500=STATION\r' --type '@0:CRAY STATION=LOGON\r' --screen 0
-python3 tools/py/hil.py session -t 60 --type '@0:+1000=STMSG\r' --type '@0:+6000=REPLY,0,GO\r' \
-    --type '@0:+30000=STMSG,I\r' --type '@0:+8000=CLASS,ALL,ON\r' --type '@0:+2000=LIMIT,5\r' --screen 0
-python3 tools/py/hil.py session -t 30 --type '@0:+1000=SUBMIT,JCAL\r'
-python3 tools/py/hil.py keys '{f2}stmsg\r'      # type on a virtual keyboard
+python3 tools/py/hil.py start cos117.ios -t 120 \
+    +40000 '10/05/89\r' +2000 '01:02:03\r' +3000 'start cos_117 deadstart\r' +25000 \
+    'station\r' +3000 '{f2}logon\r'
+python3 tools/py/hil.py play -t 90 '{f2}stmsg\r' +6000 'reply,0,go\r' +35000 \
+    'stmsg,i\r' +8000 'class,all,on\r' +2000 'limit,5\r'
+python3 tools/py/hil.py play '{f2}submit,jcal\r'
 python3 tools/py/hil.py printed                 # what the printer's file holds
+python3 tools/py/hil.py shot now.png            # what the screen shows (direct video off)
 ```
 
-No job runs before the second session's statements: COS waits for the
+`start` and `play` type on a keyboard the script gives the MiSTer: `{f1}`
+chooses the operator's console, `{f2}` the station, `\r` is RETURN, and
+letters are typed small, since Caps Lock is on in the core. Nothing tells a
+script what the operator's console shows, so between the keys it waits: `+N`
+is N milliseconds, and the times above leave room (the kernel asks for the
+date 13 seconds after the core is loaded, 27 with "Device times: Real"). A
+screenshot or the printer's file says whether it went as meant.
+
+No job runs before the second command's statements: COS waits for the
 reply to its configuration question, then `STMSG,I` must end with
 `STARTUP COMPLETE`, and the classes have to be on with a limit (the
-README's steps 8 to 10). A `+N` wait types after N milliseconds, which
-is what to use when the text to wait for is on the screen already; `@0:`
-puts the keys on the station. The year has two digits, so the date has to
+README's steps 8 to 10). The year has two digits, so the date has to
 be 1989 or thereabouts. A job's log is on the printer within seconds.
 
-Both consoles are on the HPS serial port, `/dev/ttyS1` at 115200 baud: bit 7
-of a byte is clear for the operator's console and set for the station.
-`start` and `session` wait for texts and type answers the way the benches do,
-and print a console as its 24 lines with `--screen` (0 the station, 3 the
-operator's). A serial BREAK resets the machine as the menu's reset does;
-`session --break` sends one.
+The station is also on the HPS serial port, `/dev/ttyS1` on the MiSTer, as a
+terminal on a line of its own: 9,600 baud, eight bits, no parity, the
+characters an Ampex Dialogue 80 is sent and the ones it sends. The core
+sends only while a program has the port open (Clear To Send), and the
+station then prints at the line's speed. `hil.py play --line` opens it: a
+step `?TEXT` waits until the station has printed TEXT, `>TEXT` types TEXT at
+the station over the line, and `--screen` prints the station's 24 lines at
+the end; `hil.py uart 10` copies what the line carries. The station's
+queue for what comes in holds 16 characters and the kernel takes some 300 a
+second, so a program that sends a whole line leaves 6 ms between characters
+(`play` does) or has the port keep to Request To Send, which the core drops
+when the queue is half full. The menu's UART entry is there for the
+MiSTer's own ways of taking that port elsewhere.
+On a DE10-Nano a statement sent over the line was typed at the station and
+the station's display came back over it (`hil.py play --line --screen
+'>STMSG\r' +5000`); the line is also checked in the core's simulation
+(`coretest.py start`). Request To Send and the menu's other UART modes have
+not been tried there.
 
-For a start as after a power cycle, stop the machine first (`hil.py session
---break`), then put a fresh `drives.img` in place and load the core again,
-which clears the memories. A COS that is still running writes to the drive
-again, and a start on a fresh drive with the old memory ends in `CRAY HALT`.
+A core can be tried beside the one that is installed. `MISTER_RBF` names
+the core to load as an MGL would, without date and `.rbf`, and `deploy`
+copies it there; `MISTER_SET` names a folder in `games/Cray-XMP` with
+images and boot files of its own, which `start`, `printed` and the
+benchmark then use:
+
+```sh
+export MISTER_RBF=crayxmp-try/Cray-XMP MISTER_SET=try
+python3 tools/py/hil.py deploy output_files/Cray-XMP.rbf
+python3 tools/py/bench.py mister --against tests/bench/build-20261126.json
+```
+
+For a start as after a power cycle, put a fresh `drives.img` in place and
+load the core again, which clears the memories. A COS that is still running
+writes to the drive, and a start on a fresh drive with the old memory ends
+in `CRAY HALT`.
 
 Screenshots need direct video off: `hil.py direct-video off`, `hil.py shot out.png`,
 `hil.py direct-video on`.

@@ -21,14 +21,15 @@ not depend on:
      the drive's interrupt request obeys the mask and the interrupt mode;
      and it prints a new page, six characters and a new line, then two
      parcels of dots in graphics mode and two characters in text mode again
-  5. the MIOP starts the BIOP and the XIOP as the kernel does, telling each
-     who it is through a parcel it changes in Buffer Memory
+  5. the MIOP starts the BIOP as the kernel does, telling it who it is
+     through a parcel it changes in Buffer Memory
   6. the BIOP tries its first disk drive: the buffer echo, the Status
      Response register, reserving, seeking, a sector written and read back
      under another name; and it writes four words to central memory and
      reads them back
-  7. every processor sends a word of its own to each of the others, and
-     each word arrives where it should and is seen to be taken
+  7. each processor sends a word of its own on all three of its channel
+     pairs to other processors; the one on the pair between the two arrives
+     and is seen to be taken
   8. the MIOP reads the three keys A, B and RETURN from its console, which
      whoever runs the program types one behind the other, and clears the
      keyboard channel after each as the kernel does; none may be lost
@@ -41,7 +42,7 @@ not depend on:
      which nothing may pass either way; and it holds the CPU again
 
 Each processor then writes its number and OK on its console (channel 47 on
-the MIOP, 43 on the others), or F and a letter: C clock, P Q R priority,
+the MIOP, 43 on the BIOP), or F and a letter: C clock, P Q R priority,
 a to m, o, S and Y the tape, n the Done flag of the expander, W a drive did
 not finish,
 B wrong address after the read, X what was read is not what was written,
@@ -196,7 +197,7 @@ def program(cpu):
     p.ins(0o024, R_AT)
     p.ins(0o030, R_AT)                   # A = the parcel WHO
     p.ins(0o024, R_WHO)
-    # the console: channel 47 on the MIOP, 43 on the others; B selects it
+    # the console: channel 47 on the MIOP, 43 on the BIOP; B selects it
     p.jump_if('A#0', 'other_console')
     p.a(0o47)
     p.jump('console')
@@ -444,8 +445,8 @@ def program(cpu):
         exb(0o17, 2)
     exb(0)
 
-    # ---- 5. start the BIOP (output channel 7) and the XIOP (output channel 13)
-    for target, channel in ((1, 0o7), (3, 0o13)):
+    # ---- 5. start the BIOP (output channel 7)
+    for target, channel in ((1, 0o7),):
         p.a(target)
         p.ins(0o034, R_AT)               # the parcel WHO = the number of the target
         mos(WHO, 1, 5)
@@ -618,7 +619,7 @@ def program(cpu):
         p.jump('fail')
         p.label(idle)
 
-    # ---- 7. a word to each of the others: 120000 + 20 * number + pair (octal)
+    # ---- 7. a word on each pair to another processor: 120000 + 20 * number + pair (octal)
     p.label('links')
     p.ins(0o020, R_WHO)
     p.ins(0o005, 4)                      # A = A < 4
@@ -755,9 +756,10 @@ def program(cpu):
     p.ins(0o020, R_SLOT)
     put()
     p.jump('halt')
-    # rows for the MIOP, the BIOP, IOP 2 (there is none) and the XIOP
+    # rows for the MIOP and the BIOP: what comes on the pair to the other one,
+    # and nothing on the pairs to IOP 2 and IOP 3, which do not exist
     p.label('table')
-    for row in ((0xA010, 0, 0xA030), (0xA000, 0, 0xA031), (0, 0, 0), (0xA002, 0xA012, 0)):
+    for row in ((0xA010, 0, 0), (0xA000, 0, 0)):
         for value in row:
             p.word(value)
     if cpu:

@@ -6,21 +6,24 @@ Gives the test scripts what the CRAY X-MP core exposes to Linux:
     visible through /dev/mem: central memory from word 0, the Buffer Memory
     of the I/O Subsystem from word 0o20000000, the boot file from word
     0o40000000.  Word n is 8 bytes at offset 8*n, most significant first.
-  - the two consoles on the HPS serial port /dev/ttyS1 (115200 8N1): bit 7 of
-    a byte is clear for the operator's console and set for the station.  A
-    BREAK resets the machine, as the menu's reset does.
+  - the station's line on the HPS serial port /dev/ttyS1 (9600 8N1): what the
+    station prints, as a terminal on that line would get it, and what is
+    sent there is typed at the station.  The core sends only while a program
+    here has the port open, and the station then prints at the line's speed.
   - a keyboard: keys typed here reach the core as a USB keyboard's would.
+    F1 and F2 choose the console they go to.
 
 Commands:
   peek WORD [COUNT]            print words in hex (WORD and COUNT accept 0o / 0x)
   poke WORD HEX [HEX ...]      write words
   fill WORD COUNT HEX          write one value to a range
   dump FILE WORD COUNT         save a range of memory to a file
-  uart SECONDS [--break] [--send TEXT] [--until TEXT]
-                               copy what the serial port carries to stdout
+  uart SECONDS [--send TEXT] [--until TEXT]
+                               copy what the station's line carries to stdout
   keys TEXT [--gap SEC]        type on the keyboard
-  session SECONDS [--break] [--type WAIT=KEYS]... [--until TEXT] [--screen C]...
-                               work the two consoles
+  play [--line] [--screen] [--gap SEC] STEP...
+                               work the machine: type, wait, and with --line
+                               watch the station's line
 """
 import fcntl
 import mmap
@@ -34,7 +37,6 @@ import time
 BASE = 0x30000000
 SPAN = 80 << 20           # central memory, Buffer Memory and the boot file
 TTY = '/dev/ttyS1'
-KEPT = '/tmp/xmp_console.raw'     # what the serial port has carried since the machine was started
 
 
 def mem():
@@ -80,7 +82,7 @@ def open_tty():
     a[1] = 0                                             # oflag
     a[2] = termios.CS8 | termios.CREAD | termios.CLOCAL  # cflag
     a[3] = 0                                             # lflag
-    a[4] = a[5] = termios.B115200
+    a[4] = a[5] = termios.B9600
     a[6][termios.VMIN] = 0
     a[6][termios.VTIME] = 0
     termios.tcsetattr(fd, termios.TCSANOW, a)
@@ -90,12 +92,9 @@ def open_tty():
 
 def cmd_uart(args):
     seconds = float(args[0])
-    do_break = '--break' in args
     send = args[args.index('--send') + 1] if '--send' in args else None
     until = args[args.index('--until') + 1].encode() if '--until' in args else None
     fd = open_tty()
-    if do_break:
-        termios.tcsendbreak(fd, 0)
     got = b''
     end = time.time() + seconds
     sent = send is None
@@ -115,8 +114,6 @@ def cmd_uart(args):
     os.close(fd)
 
 
-TIOCSBRK = 0x5427
-TIOCCBRK = 0x5428
 UI_SET_EVBIT, UI_SET_KEYBIT, UI_DEV_CREATE, UI_DEV_DESTROY = 0x40045564, 0x40045565, 0x5501, 0x5502
 EV_SYN, EV_KEY = 0, 1
 KEY_CTRL, KEY_SHIFT = 29, 42
@@ -160,34 +157,45 @@ def key_steps(text):
     return out
 
 
+class Keyboard:
+    """A virtual keyboard: what is typed here reaches the core as a USB keyboard's keys would."""
+
+    def __init__(self, gap=0.06):
+        self.gap = gap
+        self.fd = os.open('/dev/uinput', os.O_WRONLY | os.O_NONBLOCK)
+        fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_KEY)
+        for code in range(1, 120):
+            fcntl.ioctl(self.fd, UI_SET_KEYBIT, code)
+        # struct uinput_user_dev: name, bus/vendor/product/version, ff effects, 4 x 64 axis limits
+        os.write(self.fd, struct.pack('80sHHHHi', b'Cray-XMP test keyboard', 3, 0x1209, 0xC1A1, 1, 0) + bytes(4 * 64 * 4))
+        fcntl.ioctl(self.fd, UI_DEV_CREATE)
+        time.sleep(5.0)                       # Main_MiSTer needs a while to open the new device
+
+    def emit(self, code, value):
+        os.write(self.fd, struct.pack('llHHi', 0, 0, EV_KEY, code, value) + struct.pack('llHHi', 0, 0, EV_SYN, 0, 0))
+        time.sleep(self.gap / 2)
+
+    def type(self, text):
+        for code, shift, ctrl in key_steps(text):
+            if ctrl: self.emit(KEY_CTRL, 1)
+            if shift: self.emit(KEY_SHIFT, 1)
+            self.emit(code, 1)
+            self.emit(code, 0)
+            if shift: self.emit(KEY_SHIFT, 0)
+            if ctrl: self.emit(KEY_CTRL, 0)
+            time.sleep(self.gap)
+
+    def close(self):
+        time.sleep(0.3)
+        fcntl.ioctl(self.fd, UI_DEV_DESTROY)
+        os.close(self.fd)
+
+
 def cmd_keys(args):
     """keys TEXT [--gap SEC]: type TEXT on a virtual keyboard."""
-    gap = float(args[args.index('--gap') + 1]) if '--gap' in args else 0.06
-    steps = key_steps(args[0])
-    fd = os.open('/dev/uinput', os.O_WRONLY | os.O_NONBLOCK)
-    fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
-    for code in range(1, 120):
-        fcntl.ioctl(fd, UI_SET_KEYBIT, code)
-    # struct uinput_user_dev: name, bus/vendor/product/version, ff effects, 4 x 64 axis limits
-    os.write(fd, struct.pack('80sHHHHi', b'Cray-XMP test keyboard', 3, 0x1209, 0xC1A1, 1, 0) + bytes(4 * 64 * 4))
-    fcntl.ioctl(fd, UI_DEV_CREATE)
-    time.sleep(5.0)                           # Main_MiSTer needs a while to open the new device
-
-    def emit(code, value):
-        os.write(fd, struct.pack('llHHi', 0, 0, EV_KEY, code, value) + struct.pack('llHHi', 0, 0, EV_SYN, 0, 0))
-        time.sleep(gap / 2)
-
-    for code, shift, ctrl in steps:
-        if ctrl: emit(KEY_CTRL, 1)
-        if shift: emit(KEY_SHIFT, 1)
-        emit(code, 1)
-        emit(code, 0)
-        if shift: emit(KEY_SHIFT, 0)
-        if ctrl: emit(KEY_CTRL, 0)
-        time.sleep(gap)
-    time.sleep(0.3)
-    fcntl.ioctl(fd, UI_DEV_DESTROY)
-    os.close(fd)
+    keyboard = Keyboard(float(args[args.index('--gap') + 1]) if '--gap' in args else 0.06)
+    keyboard.type(args[0])
+    keyboard.close()
 
 
 def squeeze(raw):
@@ -280,146 +288,95 @@ def render(raw):
     return screen.text()
 
 
-def cmd_session(args):
-    """session SECONDS [--break] [--type WAIT=KEYS]... [--until TEXT] [--gap SEC]
-               [--screen C]... [--raw FILE]
+def cmd_play(args):
+    """play [--line] [--screen] [--gap SEC] STEP...
 
-    Work the two consoles of the CRAY X-MP core through the serial port, where
-    bit 7 of a byte names the console: clear is the operator's console, set
-    the station.  --type sends KEYS (\\r is RETURN) once a console has shown
-    WAIT; several are taken in order.  WAIT is found whatever blanks and cursor
-    movements lie between its characters, or when the screen shows it and did
-    not at the last KEYS (the station sends only what differs from what is
-    there); +N waits N milliseconds instead.  WAIT
-    is looked for on the operator's console, or on the station if it begins
-    with @0:, and KEYS go to the same console.  --until ends the session when
-    its text has been shown after the last KEYS; --break first holds a serial
-    BREAK, which starts the machine again.  What the operator's console prints
-    is copied to the output as it comes; --screen prints a console's 24 lines
-    at the end (0 the station, 3 the operator's).  Exit status 1 if the text of
-    --until did not come.
+    Work the machine as somebody at its keyboard does.  A STEP is
 
-    The station sends only the characters of a display that differ from what
-    is on the screen, so a session has to know what the screens showed before
-    it: everything the port carries is kept in /tmp/xmp_console.raw from one
-    session to the next.  --fresh (and --break) starts from empty screens."""
-    seconds = float(args[0])
-    typing, screens, until, gap, raw_file, do_break, fresh = [], [], None, 0.004, None, False, False
+      +N        wait N milliseconds
+      ?TEXT     with --line: wait until the station's line has carried TEXT,
+                whatever blanks and cursor movements lie between its
+                characters; ?TEXT?N waits N seconds at most (default 60)
+      >TEXT     with --line: send TEXT over the line, which types it at the
+                station
+      anything else is typed on the keyboard: \\r is RETURN, {f1} chooses the
+      operator's console and {f2} the station.  Caps Lock is on in the core
+      when it starts, so letters are typed small.
 
-    def on_console(text):
-        if text[:1] == '@' and text[2:3] == ':':
-            return (1 if text[1] == '0' else 0), text[3:]
-        return 0, text
-
-    i = 1
-    while i < len(args):
-        a = args[i]
-        i += 1
-        if a == '--break':
-            do_break = True
-        elif a == '--fresh':
-            fresh = True
-        elif a == '--type':
-            wait, keys = args[i].split('=', 1)
-            c, wait = on_console(wait)
-            delay = float(wait[1:]) / 1000 if wait[:1] == '+' and wait[1:].isdigit() else None
-            typing.append((c, squeeze(wait.encode()), keys.replace('\\r', '\r').encode(), delay))
-            i += 1
-        elif a == '--until':
-            until = on_console(args[i])
-            until = (until[0], squeeze(until[1].encode()))
-            i += 1
+    The core has nothing that tells a program here what the operator's console
+    shows: its steps are keys and waits.  With --line the station's line is
+    open for the whole run, which makes the station print at the line's 9,600
+    baud; what it carried is copied to the output, and --screen prints the
+    station's 24 lines at the end.  Exit status 1 if a ?TEXT did not come."""
+    line = '--line' in args
+    show = '--screen' in args
+    gap = float(args[args.index('--gap') + 1]) if '--gap' in args else 0.06
+    steps, skip = [], False
+    for a in args:
+        if skip or a in ('--line', '--screen'):
+            skip = False
         elif a == '--gap':
-            gap = float(args[i])
-            i += 1
-        elif a == '--screen':
-            screens.append(1 if args[i] == '0' else 0)
-            i += 1
-        elif a == '--raw':
-            raw_file = args[i]
-            i += 1
+            skip = True
         else:
-            sys.exit('session: unknown argument %s' % a)
+            steps.append(a)
+    fd = open_tty() if line else None
+    carried = bytearray()
+    screen = Ampex()
 
-    fd = open_tty()
-    if do_break:
-        fcntl.ioctl(fd, TIOCSBRK)
-        time.sleep(0.1)
-        termios.tcflush(fd, termios.TCIOFLUSH)
-        fcntl.ioctl(fd, TIOCCBRK)
-    console = [bytearray(), bytearray()]
-    screen = [Ampex(), Ampex()]
-    # what the screens showed when the session before this one ended
-    if do_break or fresh:
-        open(KEPT, 'wb').close()
-    elif os.path.exists(KEPT):
-        for b in open(KEPT, 'rb').read():
-            screen[b >> 7].put(b)
-    # the screens at the last keys, without blanks: what is on them now is not news
-    before = [squeeze(screen[n].text().encode()) for n in range(2)]
-    raw = bytearray()
-    typed_from = [0, 0]
+    def listen(seconds):
+        """Take what the line brings for so long."""
+        end = time.time() + seconds
+        while True:
+            left = end - time.time()
+            if fd is None:
+                time.sleep(max(left, 0))
+                return
+            r, _, _ = select.select([fd], [], [], max(min(left, 0.05), 0))
+            if r:
+                chunk = os.read(fd, 4096)
+                carried.extend(chunk)
+                for b in chunk:
+                    screen.put(b)
+                sys.stdout.write(''.join(chr(b) for b in chunk if b == 0x0A or 0x20 <= b < 0x7F))
+                sys.stdout.flush()
+            if left <= 0:
+                return
 
-    def has(c, want):
-        if want in squeeze(bytes(console[c][typed_from[c]:])):
-            return True
-        return want not in before[c] and want in squeeze(screen[c].text().encode())
-    said, shown = 0, False
-    out = sys.stdout
-    start = time.time()
-    waiting_since = start
-    while time.time() < start + seconds:
-        r, _, _ = select.select([fd], [], [], 0.02)
-        if r:
-            chunk = os.read(fd, 4096)
-            raw += chunk
-            for b in chunk:
-                console[b >> 7].append(b & 0x7F)
-                screen[b >> 7].put(b)
-                if not b >> 7 and (b == 0x0A or 0x20 <= b < 0x7F):
-                    out.write(chr(b))
-            out.flush()
-        if said < len(typing):
-            c, wait, keys, delay = typing[said]
-            there = time.time() - waiting_since >= delay if delay is not None else has(c, wait)
-            if there:
-                # the kernel drops a key that comes before it has finished its question
-                time.sleep(0.05)
-                for k in keys:
-                    os.write(fd, bytes([k | (0x80 if c else 0)]))
-                    time.sleep(gap)
-                said += 1
-                typed_from = [len(console[0]), len(console[1])]
-                before = [squeeze(screen[n].text().encode()) for n in range(2)]
-                waiting_since = time.time()
-        elif until and has(until[0], until[1]):
-            shown = True
-            break
-    # what is still on its way
-    end = time.time() + 0.3
-    while time.time() < end:
-        r, _, _ = select.select([fd], [], [], 0.05)
-        if r:
-            chunk = os.read(fd, 4096)
-            raw += chunk
-            for b in chunk:
-                console[b >> 7].append(b & 0x7F)
-                screen[b >> 7].put(b)
-    os.close(fd)
-    with open(KEPT, 'ab') as kept:
-        kept.write(raw)
-    if raw_file:
-        open(raw_file, 'wb').write(raw)
-    for c in screens:
-        print('\n---- %s\n%s\n----' % ('station' if c else "operator's console", screen[c].text()))
-    print('\n%.1f s; %d characters on the operator\'s console, %d on the station' % (time.time() - start, len(console[0]), len(console[1])))
-    if until:
-        print('the text was shown' if shown else 'the text was NOT shown')
-        sys.exit(0 if shown else 1)
+    keyboard = Keyboard(gap)
+    missed = None
+    for step in steps:
+        if step[:1] == '+' and step[1:].isdigit():
+            listen(int(step[1:]) / 1000)
+        elif step[:1] == '?' and line:
+            want, _, limit = step[1:].partition('?')
+            want, since, end = squeeze(want.encode()), len(carried), time.time() + float(limit or 60)
+            while want not in squeeze(bytes(carried[since:])) and time.time() < end:
+                listen(0.1)
+            if want not in squeeze(bytes(carried[since:])):
+                missed = step[1:]
+                break
+        elif step[:1] == '>' and line:
+            for b in step[1:].replace('\\r', '\r').encode():
+                os.write(fd, bytes([b]))
+                listen(0.006)                 # the kernel takes some 300 characters a second
+        else:
+            keyboard.type(step)
+            listen(0)
+    listen(0.3)
+    keyboard.close()
+    if fd is not None:
+        os.close(fd)
+    if show:
+        print('\n---- station\n%s\n----' % screen.text())
+    if line:
+        print('\n%d characters on the station\'s line' % len(carried))
+    if missed:
+        print('the station did NOT print `%s`' % missed)
+        sys.exit(1)
 
 
 COMMANDS = {'keys': cmd_keys, 'peek': cmd_peek, 'poke': cmd_poke, 'fill': cmd_fill, 'dump': cmd_dump, 'uart': cmd_uart,
-            'session': cmd_session}
+            'play': cmd_play}
 
 if __name__ == '__main__':
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:

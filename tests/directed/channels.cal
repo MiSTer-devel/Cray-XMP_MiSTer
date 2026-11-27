@@ -1,4 +1,4 @@
-* chan: the 6 Mbyte channels of the X-MP, 10 to 17 octal (CSM-0111000 pages
+* chan: the 6 Mbyte channels of the X-MP, 10 to 13 octal (CSM-0111000 pages
 * 2-15 to 2-19, 5-9 and 5-37), in monitor mode, with each output channel
 * cabled to the input channel of its pair.  The program waits for a channel
 * by reading the number of the channel that asks, so it does not depend on
@@ -128,13 +128,13 @@ FIOI     =       4                       ; flag bit 37
          WAITCI  11
          CI,A2
 * only the low four bits of (Aj) name the channel, and 0 to 7 name none.
-* Channel 15 gets an address of its own first: its Ready goes out and is
-* held by channel 14.
-         A5      15
+* Channel 13 gets an address of its own first: its Ready goes out and is
+* held by channel 12.
+         A5      13
          START   A5,KSRC,KSRC+1
          DELAY
          CI,A5
-         A3      14
+         A3      12
          MC,A3
          A3      5
          A4      DST
@@ -145,12 +145,30 @@ FIOI     =       4                       ; flag bit 37
          CHKA    A5,0,20
          A5      CE,A3
          CHKA    A5,0,21
-         A3      15
+         A3      13
          A5      CA,A3
          CHKA    A5,KSRC+1,36
-         A5      36                      ; channel 16
+* neither do 14 to 17: this mainframe has the two pairs 10 to 13
+         A3      14
+         A4      DST
+         CL,A3   A4
+         CA,A3   A4
+         CI,A3
+         A5      CA,A3
+         CHKA    A5,0,37
+         A3      17
+         CL,A3   A4
+         CA,A3   A4
+         MC,A3
+         A5      CA,A3
+         CHKA    A5,0,40
+         A5      CE,A3
+         CHKA    A5,0,41
+         A5      CI
+         CHKA    A5,0,42
+         A5      32                      ; channel 12
          START   A5,DST+17,DST+21
-         A5      37                      ; channel 17
+         A5      33                      ; channel 13
          START   A5,KSRC+16,KSRC+20
 * two pairs at work: the lowest numbered channel that asks is reported
          START   A1,DST+21,DST+22
@@ -159,13 +177,13 @@ FIOI     =       4                       ; flag bit 37
          CI,A1
          WAITCI  11
          CI,A2
-         WAITCI  16
-         A3      16
+         WAITCI  12
+         A3      12
          A5      CA,A3
          CHKA    A5,DST+21,22
          CI,A3
-         WAITCI  17
-         A3      17
+         WAITCI  13
+         A3      13
          CI,A3
          A5      CI
          CHKA    A5,0,23
@@ -256,8 +274,8 @@ KSRC     CON     X'0123456789ABCDEF      ; three words
          CON     X'DEADDEADDEADDEAD      ; abandoned
          CON     X'DEADDEADDEADDEAD
          CON     X'0F0F0F0F0F0F0F0F      ; after MC
-         CON     X'1600000000000016      ; channels 16 and 17
-         CON     X'1700000000000017
+         CON     X'1200000000000012      ; channels 12 and 13
+         CON     X'1300000000000013
          CON     X'2000000000000020      ; beside them on 10 and 11
          CON     X'2100000000000021      ; the interrupt flag
          CON     X'2200000000000022
@@ -277,8 +295,8 @@ KEXP     CON     X'0123456789ABCDEF
          CON     X'A000000000000011
          CON     X'A000000000000012
          CON     X'0F0F0F0F0F0F0F0F
-         CON     X'1600000000000016
-         CON     X'1700000000000017
+         CON     X'1200000000000012
+         CON     X'1300000000000013
          CON     X'2000000000000020
          CON     X'2100000000000021
          CON     X'2200000000000022

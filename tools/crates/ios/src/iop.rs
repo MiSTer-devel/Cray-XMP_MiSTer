@@ -63,6 +63,10 @@ pub trait Channels {
     /// The lowest numbered channel (5 to 47 octal) with Done and its
     /// Interrupt Enable both set.
     fn interrupt(&mut self) -> Option<u8>;
+    /// Clock periods pass before the processor issues what it does next: a
+    /// step begins with the wait for its issue, and the channels are asked
+    /// and told in the clock period of the issue.
+    fn pass(&mut self, _clock_periods: u32) {}
 }
 
 /// No devices: every channel from 5 up is empty.
@@ -99,45 +103,284 @@ pub struct Counters {
     pub long_shifts: u64,
     /// Times the Exit Stack Boundary flag was set.
     pub boundary_flags: u64,
+    /// Stores of the processor (034 to 037) into a parcel the instruction
+    /// stack held or had asked for.
+    pub stack_stores: u64,
+    /// Times a channel had changed a parcel the instruction stack held.
+    pub stack_device_stores: u64,
+    /// Branches that were taken to an instruction in the stack, and those
+    /// that filled it again (EXIT and interrupts among them).
+    pub in_stack: u64,
+    pub out_of_stack: u64,
 }
 
-/// Clock periods of the instructions 000 to 067: the clock period in which
-/// HR-0030 delivers the result, counted from the issue in clock period 0
-/// (the "CP" column of the spec, part 4.3), with two changes.  A PASS takes
-/// the one clock period of its issue.  An EXIT has P in clock period 2
-/// [HW 6-4] and, like every branch that leaves the instruction stack, needs
-/// 5 more to bring the first instruction of the new sequence to issue (074
-/// has P in clock period 4 and issues in 9 [HW 6-63]).
-///
-/// The real machine overlaps instructions and its memory can make a
-/// reference wait, so these are estimates (spec part 8.1).
-const CLOCK_PERIODS: [u8; 0o70] = [
-    1, 7, 1, 2, 3, 3, 3, 3, // 000 to 007
-    1, 1, 3, 3, 2, 2, 4, 4, // 010 to 017
-    2, 2, 4, 4, 2, 5, 5, 5, // 020 to 027
-    7, 7, 9, 9, 6, 13, 13, 13, // 030 to 037
-    5, 5, 5, 5, 3, 3, 3, 3, // 040 to 047
-    1, 1, 3, 3, 3, 4, 4, 4, // 050 to 057
-    2, 2, 4, 4, 2, 5, 5, 5, // 060 to 067
-];
-/// A branch to an instruction that is in the instruction stack: "can issue
-/// at CP 5" [HW 6-59].
-const CP_BRANCH_IN_STACK: u32 = 5;
-/// A branch that refills the instruction stack from memory: P in clock
-/// period 4, issue in n + 4 with n at least 5 [HW 6-63].
-const CP_BRANCH: u32 = 9;
-/// A forward relative branch of at most 11 octal parcels, or a backward one
-/// of at most 13 octal, stays in the instruction stack [HW 3-5].
-const IN_STACK_FORWARD: u16 = 0o11;
-const IN_STACK_BACKWARD: u16 = 0o13;
+// ---- when an instruction issues (spec part 8)
+//
+// An instruction does all it does in the clock period it issues in; what
+// the real machine spreads over the clock periods behind that only decides
+// when the instructions behind it may issue.  The rules are those of the
+// spec, part 8.2: R1 to R13 there.
+
+/// Parcels of the instruction stack [HW 3-3].
+pub const STACK: usize = 32;
+/// The stack is filled while the last parcel loaded is fewer than this many
+/// ahead of the instruction that issues next (HR-0808 Part 3 3-5).
+const STACK_AHEAD: i32 = 8;
+/// Clock periods from the read of a parcel in Local Memory to the first one
+/// it can issue in: a fetch request in clock period q has its first parcel
+/// read in q + 1 and issuing in q + 5 [HW 6-59].
+const CP_FETCH: usize = 4;
+/// A branch to an instruction in the stack: "can issue at CP 5" [HW 6-59].
+const CP_IN_STACK: u64 = 5;
+/// The fetch request of a branch that leaves the stack is in its clock
+/// period 4 [HW 6-59, 6-63], that of an EXIT in 2, where P is loaded
+/// [HW 6-4], and the first instruction of the new sequence issues 5 clock
+/// periods after the request.
+const CP_REQUEST: u64 = 4;
+const CP_REQUEST_EXIT: u64 = 2;
+const CP_REQUEST_TO_ISSUE: u64 = 5;
+/// A store of the processor into a parcel the stack holds makes the stack
+/// fill again behind it: the request is in the clock period of the store.
+const CP_REQUEST_STORE: u64 = 2;
 /// The interrupt sequence.  The manual gives no time; it is taken to cost
-/// what a return jump out of the instruction stack costs.
-const CP_INTERRUPT: u32 = CP_BRANCH;
-/// A channel function that sends the accumulator, and one that reads into
-/// it: "output from accumulator takes 1 CP", "input to accumulator takes 4-6
-/// CP" (T0201D page 4.4).
-const CP_FUNCTION_OUT: u32 = 1;
-const CP_FUNCTION_IN: u32 = 5;
+/// what a return jump out of the instruction stack costs: 9 clock periods.
+const CP_INTERRUPT: u64 = CP_REQUEST + CP_REQUEST_TO_ISSUE;
+/// "No other instruction can issue until CP 5" behind 040 to 043 [HW 6-35].
+const CP_FLAG_TEST: u64 = 5;
+
+/// Two parcels: 014 to 017, and the branches by an operand register and k.
+fn two_parcels(f: u16) -> bool {
+    matches!(f, 0o014..=0o017 | 0o075 | 0o077 | 0o124..=0o127 | 0o134..=0o137)
+}
+/// Branches by P and d (070 to 073, 100 to 117).
+fn relative(f: u16) -> bool {
+    matches!(f, 0o070..=0o073 | 0o100..=0o117)
+}
+/// Branches by an operand register (074 to 077, 120 to 137).
+fn absolute(f: u16) -> bool {
+    matches!(f, 0o074..=0o077 | 0o120..=0o137)
+}
+/// In how many clock periods from its issue an instruction wants the
+/// accumulator free: at issue, in 1 or in 2 (CSM-1009 page 7-2; 014 to 017
+/// one more than that table, which has their issue behind the read of k).
+/// `None` for those that do not use it.
+fn accumulator_in(f: u16) -> Option<u64> {
+    match f {
+        0o010 | 0o050 | 0o054 | 0o056 | 0o057 => Some(0),
+        0o004..=0o007
+        | 0o011..=0o014
+        | 0o020
+        | 0o021
+        | 0o024
+        | 0o026
+        | 0o027
+        | 0o044..=0o047
+        | 0o051..=0o053
+        | 0o055
+        | 0o060
+        | 0o061
+        | 0o064
+        | 0o066
+        | 0o067
+        | 0o140..=0o177 => Some(1),
+        0o015..=0o017 | 0o022 | 0o023 | 0o025 | 0o030..=0o043 | 0o062 | 0o063 | 0o065 => Some(2),
+        _ => None,
+    }
+}
+/// The clock period, counted from the issue, in which an instruction
+/// delivers to the accumulator ("the accumulator is free for subsequent
+/// instructions").  054 has it at 2 on the Model B [HW 6-47]; 024 and 064
+/// reserve nothing.
+fn accumulator_free(f: u16) -> Option<u64> {
+    match f {
+        0o010 | 0o011 | 0o050 | 0o051 => Some(1),
+        0o014 | 0o015 | 0o020 | 0o021 | 0o054 | 0o060 | 0o061 => Some(2),
+        0o004..=0o007 | 0o012 | 0o013 | 0o044..=0o047 | 0o052 | 0o053 | 0o055..=0o057 => Some(3),
+        0o016 | 0o017 | 0o022 | 0o023 | 0o025..=0o027 | 0o034 | 0o062 | 0o063 | 0o065..=0o067 => {
+            Some(4)
+        }
+        0o040..=0o043 => Some(5),
+        0o150..=0o153 | 0o170..=0o173 => Some(6),
+        0o030 | 0o031 => Some(7),
+        0o032 | 0o033 => Some(9),
+        0o035..=0o037 => Some(11),
+        _ => None,
+    }
+}
+/// The clock period in which an instruction has the adder.
+fn adder_in(f: u16) -> Option<u64> {
+    match f {
+        0o012 | 0o013 | 0o052 | 0o053 | 0o055..=0o057 => Some(2),
+        0o016 | 0o017 | 0o022 | 0o023 | 0o025..=0o027 | 0o062 | 0o063 | 0o065..=0o067 => Some(3),
+        0o032 | 0o033 | 0o035..=0o037 => Some(8),
+        _ => None,
+    }
+}
+/// Instructions that write an operand register through the DP register and
+/// cannot issue while it is full (CSM-1009 page 7-3).
+fn wants_dp(f: u16) -> bool {
+    matches!(f, 0o011 | 0o015 | 0o024..=0o027 | 0o051 | 0o064..=0o067)
+}
+/// Instructions that read an operand register.
+fn reads_register(f: u16) -> bool {
+    matches!(f, 0o020..=0o037 | 0o060..=0o067) || absolute(f)
+}
+/// Of those, the ones whose read is in their clock period 2 and waits there
+/// for a store into the same register that is still on its way.
+fn reads_late(f: u16) -> bool {
+    matches!(f, 0o022 | 0o023 | 0o030..=0o037 | 0o062 | 0o063) || absolute(f)
+}
+/// Instructions that cannot issue while B is reserved.
+fn wants_b(f: u16) -> bool {
+    matches!(f, 0o011 | 0o015 | 0o042..=0o067 | 0o160..=0o177)
+}
+/// Functions that read into the accumulator.
+fn input(f: u16) -> bool {
+    matches!(f, 0o150..=0o153 | 0o170..=0o173)
+}
+
+/// What the stream of instructions does in a clock period, for the
+/// instruction stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Flow {
+    /// Nothing issues.
+    Wait,
+    /// An instruction of so many parcels issues and the one behind it is
+    /// next.
+    Next(i32),
+    /// A branch to an instruction in the stack, so many parcels forward.
+    InStack(i32),
+    /// The stack is filled again from P, with the fetch request in this
+    /// clock period.
+    Refill(u64),
+}
+
+/// What an instruction did, as far as its clock periods go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Did {
+    Plain,
+    Exit,
+    NotTaken,
+    /// A branch by P and d that was taken: the parcels forward.
+    Relative(i32),
+    /// A branch by an operand register that was taken.
+    Absolute,
+}
+
+/// The clock periods things are free in, and the instruction stack.  Times
+/// are clock periods since the processor was made.
+#[derive(Clone, Debug)]
+struct Issue {
+    /// The clock period that is next.
+    now: u64,
+    /// The earliest issue the order of the program allows.
+    seq: u64,
+    /// One clock period behind the one in which the criterion of a
+    /// conditional branch exists: two behind the last delivery to the
+    /// accumulator.
+    criterion: u64,
+    /// The DP register is empty from here on; the register it has the
+    /// pointer of.
+    dp_empty: u64,
+    dp_register: u16,
+    /// B is not reserved from here on.
+    b_free: u64,
+    /// The last acceptance of a reference by Local Memory.
+    accepted: u64,
+    /// The clock period in which an instruction that has issued has the
+    /// adder.
+    adder: u64,
+    /// The issue of the last function that reads, and of the last
+    /// instruction whose word for the accumulator comes a clock period
+    /// behind its issue.
+    input: Option<u64>,
+    late: Option<u64>,
+    /// Clock periods in which an instruction has the port into Local Memory.
+    port: [Option<u64>; 2],
+    /// The stack is being filled; or will be again from P, with the fetch
+    /// request in this clock period.
+    filling: bool,
+    refill: Option<u64>,
+    /// The address of the parcel that is read next.
+    load: u16,
+    /// Parcels the stack holds or has asked for, 32 at most: the window is
+    /// the `count` addresses below `load`.
+    count: u32,
+    /// Parcels asked for from P on, and those of them that can issue.
+    asked: i32,
+    ahead: i32,
+    /// Parcels read one, two and three clock periods ago.
+    coming: [bool; CP_FETCH - 1],
+    /// What the stack holds, by the low five bits of the address.
+    copy: [u16; STACK],
+}
+
+impl Issue {
+    fn new() -> Issue {
+        Issue {
+            now: 0,
+            seq: 0,
+            criterion: 0,
+            dp_empty: 0,
+            dp_register: 0,
+            b_free: 0,
+            accepted: 0,
+            adder: 0,
+            input: None,
+            late: None,
+            port: [None; 2],
+            filling: false,
+            refill: None,
+            load: 0,
+            count: 0,
+            asked: 0,
+            ahead: 0,
+            coming: [false; CP_FETCH - 1],
+            copy: [0; STACK],
+        }
+    }
+
+    /// Master Clear: nothing is reserved and the stack is empty.
+    fn clear(&mut self) {
+        *self = Issue {
+            now: self.now,
+            ..Issue::new()
+        };
+    }
+
+    /// The parcels the stack would still read if the instruction that
+    /// issues now, of so many parcels, were followed by the one behind it:
+    /// the rest of the burst under way, and the bursts that keep the last
+    /// parcel asked for 8 ahead.  The manual's "predetermined internal
+    /// fetches" (HR-0808 Part 3 page 3-5).
+    fn to_come(&self, parcels: i32) -> i32 {
+        if !self.filling {
+            return 0;
+        }
+        // the rest of the burst, then one or two bursts more (a branch has
+        // the parcel behind it in the stack or on its way: never three)
+        let rest = (4 - (self.load & 3) as i32) & 3;
+        let ahead = self.asked - parcels + rest;
+        rest + if ahead <= STACK_AHEAD - 4 {
+            8
+        } else if ahead <= STACK_AHEAD {
+            4
+        } else {
+            0
+        }
+    }
+
+    /// Nothing happens in the stack by itself in the clock periods to come.
+    fn at_rest(&self) -> bool {
+        self.refill.is_none()
+            && self.coming == [false; CP_FETCH - 1]
+            && self
+                .port
+                .iter()
+                .all(|at| at.map_or(true, |at| at < self.now))
+            && !(self.filling && (self.load & 3 != 0 || self.asked <= STACK_AHEAD))
+    }
+}
 
 /// One I/O Processor.  See the crate documentation.
 pub struct Iop {
@@ -177,6 +420,18 @@ pub struct Iop {
     rtc_done: bool,
     rtc_enable: bool,
     counters: Counters,
+    /// When things are free, and the instruction stack.
+    t: Issue,
+    /// A channel may have stored in Local Memory since the stack was last
+    /// held against it.
+    stored: bool,
+    /// The parcel of the stack a channel was found to have changed, in the
+    /// step that found it.
+    device_store: Option<u16>,
+    /// The channel outside the processor (the real-time clock, 4, among
+    /// them) that asked for an interrupt in the clock period the last step
+    /// issued in.
+    asked_by: Option<u8>,
 }
 
 impl Default for Iop {
@@ -211,6 +466,10 @@ impl Iop {
             rtc_done: false,
             rtc_enable: false,
             counters: Counters::default(),
+            t: Issue::new(),
+            stored: false,
+            device_store: None,
+            asked_by: None,
         };
         iop.master_clear();
         iop
@@ -244,16 +503,18 @@ impl Iop {
         self.lme_enable = false;
         self.rtc_done = false;
         self.rtc_enable = false;
+        self.t.clear();
     }
 
     /// Leave the Master Clear state without a dead start and go on at `p`
-    /// with System Interrupt Enable clear.  For tests; the real machine
-    /// starts by the dead start interrupt (see `step`).
+    /// with System Interrupt Enable clear, the instruction stack filling
+    /// from there.  For tests; the real machine starts by the dead start
+    /// interrupt (see `step`).
     pub fn start_at(&mut self, p: u16) {
-        self.p = p;
         self.i = false;
         self.i_delayed = false;
         self.held = false;
+        self.set_p(p);
     }
 
     // ---- state
@@ -309,7 +570,18 @@ impl Iop {
     /// Local Memory, for the dead start load and for devices that move data
     /// outside a function strobe.
     pub fn memory_mut(&mut self) -> &mut [u16] {
+        self.stored = true;
         &mut self.mem
+    }
+    /// The parcel of the instruction stack a channel was found to have
+    /// changed at the beginning of the last step, if it found one.
+    pub fn device_store(&self) -> Option<u16> {
+        self.device_store
+    }
+    /// The channel from 4 up that asked for an interrupt in the clock period
+    /// the last step issued in, whether or not the interrupt was taken.
+    pub fn asked_by(&self) -> Option<u8> {
+        self.asked_by
     }
     /// The real-time clock's counter: 0 to `RTC_PERIOD` - 1.
     pub fn rtc(&self) -> u32 {
@@ -348,9 +620,19 @@ impl Iop {
         self.counters
     }
 
-    /// Set P.
+    /// Set P.  The instruction stack fills from there, as from the address
+    /// of a branch, with the first parcel read in the clock period that is
+    /// next.
     pub fn set_p(&mut self, p: u16) {
         self.p = p;
+        if !self.held {
+            let t = &mut self.t;
+            t.refill = None;
+            t.filling = true;
+            t.load = p;
+            (t.count, t.asked, t.ahead) = (0, 0, 0);
+            t.coming = [false; CP_FETCH - 1];
+        }
     }
     /// Set the accumulator.
     pub fn set_a(&mut self, a: u16) {
@@ -373,13 +655,180 @@ impl Iop {
 
     /// Let `clock_periods` pass without executing anything.  The real-time
     /// clock counts them: on reaching 234177 octal it sets its Done flag
-    /// and starts again at 0 [HW 5-12].
+    /// and starts again at 0 [HW 5-12].  The instruction stack goes on
+    /// filling as far as it does by itself.
     pub fn advance(&mut self, clock_periods: u32) {
+        let mut left = clock_periods;
+        while left > 0 && !self.t.at_rest() {
+            self.tick(Flow::Wait);
+            left -= 1;
+        }
+        self.pass(left);
+    }
+
+    /// Clock periods in which nothing moves in the instruction stack.
+    fn pass(&mut self, clock_periods: u32) {
         let count = self.rtc as u64 + clock_periods as u64;
         if count >= RTC_PERIOD as u64 {
             self.rtc_done = true;
         }
         self.rtc = (count % RTC_PERIOD as u64) as u32;
+        self.t.now += clock_periods as u64;
+    }
+
+    /// One clock period passes: the next parcel of the instruction stack is
+    /// read from Local Memory if the stack is being filled, wants one and an
+    /// instruction does not have the port; a parcel read three clock periods
+    /// ago can issue from the next one on; and the stream of instructions
+    /// moves on as `flow` says.
+    fn tick(&mut self, flow: Flow) {
+        // (most clock periods of waiting: nothing but the time moves)
+        if flow == Flow::Wait && self.t.at_rest() {
+            self.t.now += 1;
+            self.count_clock();
+            return;
+        }
+        let read = self.read();
+        self.tock(read, flow);
+    }
+
+    /// The real-time clock counts a clock period.
+    fn count_clock(&mut self) {
+        self.rtc += 1;
+        if self.rtc == RTC_PERIOD {
+            self.rtc = 0;
+            self.rtc_done = true;
+        }
+    }
+
+    /// The first half of a clock period: the parcel the instruction stack
+    /// reads in it, if it reads one.  It is read as Local Memory holds it
+    /// before an instruction that issues in this clock period, or the
+    /// channel it sends a function to, has stored anything.
+    fn read(&self) -> Option<u16> {
+        let t = &self.t;
+        let port_taken = t.port.contains(&Some(t.now));
+        let read = t.filling && !port_taken && (t.load & 3 != 0 || t.asked <= STACK_AHEAD);
+        read.then(|| self.mem[t.load as usize])
+    }
+
+    /// The rest of the clock period.
+    fn tock(&mut self, read: Option<u16>, flow: Flow) {
+        let t = &mut self.t;
+        let now = t.now;
+        if let Some(parcel) = read {
+            t.copy[t.load as usize % STACK] = parcel;
+            t.load = t.load.wrapping_add(1);
+            t.count = (t.count + 1).min(STACK as u32);
+            t.asked += 1;
+        }
+        let read = read.is_some();
+        if t.coming[CP_FETCH - 2] {
+            t.ahead += 1;
+        }
+        t.coming.rotate_right(1);
+        t.coming[0] = read;
+        match flow {
+            Flow::Wait => {}
+            Flow::Next(parcels) | Flow::InStack(parcels) => {
+                t.asked -= parcels;
+                t.ahead -= parcels;
+            }
+            Flow::Refill(request) => {
+                t.filling = false;
+                t.count = 0;
+                t.coming = [false; CP_FETCH - 1];
+                t.refill = Some(request);
+            }
+        }
+        if t.refill == Some(now) {
+            t.refill = None;
+            t.filling = true;
+            t.load = self.p;
+            (t.count, t.asked, t.ahead) = (0, 0, 0);
+            t.coming = [false; CP_FETCH - 1];
+        }
+        t.now = now + 1;
+        self.count_clock();
+    }
+
+    /// The first clock period in which the order of the program and what is
+    /// held let the instruction `f` issue (R1, R3, R4, R6 and R7 of the
+    /// spec, part 8.2).
+    fn earliest(&self, f: u16) -> u64 {
+        let t = &self.t;
+        let mut at = t.seq;
+        // R3: the accumulator, free in the k clock periods the instruction gives it
+        if let Some(k) = accumulator_in(f) {
+            at = at.max(t.criterion.saturating_sub(k + 2));
+        }
+        // R4: the DP register; R6: B; R7: the memory address register
+        if wants_dp(f) {
+            at = at.max(t.dp_empty);
+        }
+        if wants_b(f) {
+            at = at.max(t.b_free);
+        }
+        if (0o030..=0o037).contains(&f) {
+            at = at.max(t.accepted.saturating_sub(1));
+        }
+        at
+    }
+
+    /// The instruction `parcel` at P can issue in the clock period that is
+    /// next (spec part 8.2, R1 to R13).
+    fn can_issue(&self, parcel: u16) -> bool {
+        let t = &self.t;
+        let now = t.now;
+        let f = parcel >> 9;
+        let parcels = if two_parcels(f) { 2 } else { 1 };
+        // parcels from P on that can issue now, and in the next clock period
+        let next = t.ahead + t.coming[CP_FETCH - 2] as i32;
+        // R1, R3, R4, R6, R7: its turn, and what it wants free
+        if now < self.earliest(f) {
+            return false;
+        }
+        // R2: its parcels in the stack; R5: the way of DP into RP
+        if t.ahead < 1 || next < parcels || (reads_register(f) && now + 1 == t.dp_empty) {
+            return false;
+        }
+        if (0o070..=0o137).contains(&f) {
+            // R10: the parcel behind the branch
+            if next < parcels + 1 {
+                return false;
+            }
+            // R8: the adder, for a branch by P; R9: a function that reads,
+            // for one by an operand register
+            if (relative(f) && now + 2 == t.adder) || (absolute(f) && t.input == now.checked_sub(1))
+            {
+                return false;
+            }
+            // R13: the accumulator's word of the instruction before, for a
+            // branch on a condition
+            if f >= 0o100 && t.late == now.checked_sub(1) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// A channel has stored in Local Memory.  If it changed a parcel the
+    /// instruction stack holds, the stack is filled again from P, with the
+    /// fetch request in this clock period.
+    fn device_stores(&mut self) {
+        if !self.t.filling {
+            return;
+        }
+        for back in 1..=self.t.count {
+            let address = self.t.load.wrapping_sub(back as u16);
+            if self.mem[address as usize] != self.t.copy[address as usize % STACK] {
+                self.device_store = Some(address);
+                self.counters.stack_device_stores += 1;
+                let now = self.t.now;
+                self.tick(Flow::Refill(now));
+                return;
+            }
+        }
     }
 
     /// The number `IOR : 10` reads: the highest priority (lowest numbered)
@@ -399,34 +848,88 @@ impl Iop {
     }
 
     /// Execute one instruction, or take one interrupt, and return the
-    /// number of clock periods (12.5 ns) it took on the real machine.  The
-    /// real-time clock has counted them when `step` returns.
+    /// number of clock periods (12.5 ns) from where the step began to the
+    /// clock period of its issue, that one included: after a step that
+    /// follows another, from the issue before to this one.  The real-time
+    /// clock has counted them when `step` returns.
     ///
-    /// An interrupt is taken instead of the next instruction when a channel
-    /// requests one and System Interrupt Enable is set [HW 5-19].  After
+    /// An instruction issues when what it needs is free (spec part 8.2);
+    /// until then clock periods pass.  It then does all it does at once.
+    ///
+    /// An interrupt is taken instead of the next instruction, in the clock
+    /// period that one would issue in, when a channel requests one and
+    /// System Interrupt Enable is set [HW 5-19].  After
     /// Master Clear that is the only thing that happens: the dead start is
     /// the interrupt of channel 5 at the end of the load of Local Memory
     /// [HW 5-15], which starts the program at the address in exit stack
     /// location 0, and Master Clear made that 0.  Until then a step is one
     /// idle clock period.
     pub fn step(&mut self, channels: &mut dyn Channels) -> u32 {
-        let clock_periods = self.execute(channels);
-        self.advance(clock_periods);
-        clock_periods
+        let start = self.t.now;
+        self.device_store = None;
+        if self.stored {
+            self.stored = false;
+            self.device_stores();
+        }
+        if !self.held {
+            let parcel = self.mem[self.p as usize];
+            while !self.can_issue(parcel) {
+                // (while nothing moves in the stack, straight to the clock
+                // period the instruction waits for)
+                let earliest = self.earliest(parcel >> 9);
+                if earliest > self.t.now && self.t.at_rest() {
+                    self.pass((earliest - self.t.now) as u32);
+                } else {
+                    self.tick(Flow::Wait);
+                }
+            }
+        }
+        let waited = (self.t.now - start) as u32;
+        if waited != 0 {
+            channels.pass(waited);
+        }
+        // the instruction stack reads its parcel of this clock period first
+        // (unless an instruction that issues has the port for its operand)
+        let now = self.t.now;
+        self.asked_by = if self.rtc_done && self.rtc_enable {
+            Some(channel::RTC as u8)
+        } else {
+            channels.interrupt()
+        };
+        let inside = (self.pfr && self.pfr_enable) || (self.boundary && self.pxs_enable);
+        let interrupts = self.i && (inside || self.asked_by.is_some());
+        let operand = (0o030..=0o037).contains(&(self.mem[self.p as usize] >> 9));
+        if !interrupts && !self.held && operand {
+            self.t.port[0] = Some(now);
+        }
+        let read = self.read();
+        let flow = self.execute(channels, interrupts);
+        self.tock(read, flow);
+        (self.t.now - start) as u32
     }
 
-    fn execute(&mut self, channels: &mut dyn Channels) -> u32 {
-        if self.i && self.interrupt_request(channels).is_some() {
+    fn execute(&mut self, channels: &mut dyn Channels, interrupts: bool) -> Flow {
+        let now = self.t.now;
+        if interrupts {
             self.interrupt();
-            return CP_INTERRUPT;
+            self.t.seq = now + CP_INTERRUPT;
+            self.counters.out_of_stack += 1;
+            return Flow::Refill(now + CP_REQUEST);
         }
         if self.held {
-            return 1;
+            return Flow::Wait;
         }
         let parcel = self.mem[self.p as usize];
-        let f = parcel >> 9;
+        let (f, d) = (parcel >> 9, parcel & D_MASK);
         let delayed = self.i_delayed;
-        let clock_periods = self.instruction(channels, f, parcel & D_MASK);
+        // what the clock periods of the instruction go by, as it finds it
+        let register = if (0o060..=0o067).contains(&f) {
+            self.b
+        } else {
+            d
+        };
+        let address = self.or[d as usize];
+        let did = self.instruction(channels, f, d);
         self.counters.instructions += 1;
         // 003 takes effect late: "the System Interrupt Enable flag is
         // delayed until the next nonbranch or non-I/O instruction is
@@ -441,7 +944,104 @@ impl Iop {
             self.i = true;
             self.i_delayed = false;
         }
-        clock_periods
+        self.issued(f, register, address, did)
+    }
+
+    /// The instruction `f` has issued in the clock period that is next: what
+    /// it holds from now on, when the instruction behind it may issue at the
+    /// earliest, and what becomes of the instruction stack.  `register` is
+    /// the operand register it names and `address` what that register held.
+    fn issued(&mut self, f: u16, register: u16, address: u16, did: Did) -> Flow {
+        let now = self.t.now;
+        let parcels: u64 = if two_parcels(f) { 2 } else { 1 };
+        let t = &mut self.t;
+        // A read of an operand register in clock period 2 waits for a store
+        // into the same register that is on its way through DP (it is there
+        // in the clock period behind the one DP empties in), and all that
+        // follows in the instruction waits with it.
+        let waits = match t.dp_empty.checked_sub(now + 1) {
+            Some(wait) if wait >= 1 && reads_late(f) && t.dp_register == register => wait,
+            _ => 0,
+        };
+        // a branch by an operand register has the adder a clock period
+        // later if an instruction before it has it in its clock period 3
+        let adder_waits = (absolute(f) && t.adder == now + 3 + waits) as u64;
+        let criterion = t.criterion;
+        if let Some(free) = accumulator_free(f) {
+            t.criterion = now + free + waits + 2;
+        }
+        if let Some(at) = adder_in(f) {
+            t.adder = now + at + waits;
+        }
+        match f {
+            0o025..=0o027 | 0o065..=0o067 => {
+                t.dp_empty = now + 4;
+                t.dp_register = register;
+            }
+            0o030..=0o034 => t.accepted = now + 4 + waits,
+            0o035..=0o037 => t.accepted = now + 11 + waits,
+            0o054 => t.b_free = now + 3,
+            0o055..=0o057 => t.b_free = now + 4,
+            _ => {}
+        }
+        if input(f) {
+            t.input = Some(now);
+        }
+        if matches!(f, 0o030..=0o033 | 0o035..=0o037) || input(f) {
+            t.late = Some(now);
+        }
+        // the port into Local Memory: the operand is read in the clock
+        // period of the issue, a result is stored two behind it
+        let stores = (0o034..=0o037).contains(&f);
+        if (0o030..=0o037).contains(&f) {
+            t.port[1] = stores.then_some(now + 2);
+        }
+        // a conditional branch: what follows it waits for the criterion
+        let behind = |at: u64| if f >= 0o100 { at.max(criterion) } else { at };
+        let (seq, flow) = match did {
+            // a store into a parcel the stack holds or is about to read
+            Did::Plain
+                if stores && t.filling && (t.load.wrapping_sub(address) as u32) <= t.count =>
+            {
+                self.counters.stack_stores += 1;
+                let request = now + CP_REQUEST_STORE;
+                (request + CP_REQUEST_TO_ISSUE, Flow::Refill(request))
+            }
+            Did::Plain if (0o040..=0o043).contains(&f) => (now + CP_FLAG_TEST, Flow::Next(1)),
+            Did::Plain => (now + parcels, Flow::Next(parcels as i32)),
+            Did::NotTaken => (behind(now + parcels), Flow::Next(parcels as i32)),
+            Did::Exit => {
+                self.counters.out_of_stack += 1;
+                let request = now + CP_REQUEST_EXIT;
+                (request + CP_REQUEST_TO_ISSUE, Flow::Refill(request))
+            }
+            // In the stack: no farther forward than the last parcel that is
+            // asked for or will be, no farther back than the stack will
+            // reach then: the parcels to come take the places of the oldest.
+            Did::Relative(forward)
+                if t.filling
+                    && forward < t.asked + t.to_come(parcels as i32)
+                    && -forward
+                        <= (t.count as i32).min(STACK as i32 - t.to_come(parcels as i32))
+                            - t.asked =>
+            {
+                self.counters.in_stack += 1;
+                (behind(now + CP_IN_STACK), Flow::InStack(forward))
+            }
+            Did::Relative(_) | Did::Absolute => {
+                self.counters.out_of_stack += 1;
+                let request = now
+                    + CP_REQUEST
+                    + if did == Did::Absolute {
+                        waits + adder_waits
+                    } else {
+                        0
+                    };
+                (behind(request + CP_REQUEST_TO_ISSUE), Flow::Refill(request))
+            }
+        };
+        t.seq = seq;
+        flow
     }
 
     /// The interrupt sequence [HW 5-19]: clear System Interrupt Enable,
@@ -584,8 +1184,8 @@ impl Iop {
     // ---- instructions
 
     /// Execute the instruction with operation code `f` and field `d` at P;
-    /// returns its clock periods.
-    fn instruction(&mut self, channels: &mut dyn Channels, f: u16, d: u16) -> u32 {
+    /// returns what it did to the order of the program.
+    fn instruction(&mut self, channels: &mut dyn Channels, f: u16, d: u16) -> Did {
         let p = self.p;
         // the second parcel of a 2-parcel instruction
         let k = self.mem[p.wrapping_add(1) as usize];
@@ -596,7 +1196,7 @@ impl Iop {
             // EXIT
             0o001 => {
                 self.exit();
-                return CLOCK_PERIODS[f as usize] as u32;
+                return Did::Exit;
             }
             // I = 0; it also cancels a 003 that has not taken effect
             // [HW 6-6]
@@ -655,12 +1255,11 @@ impl Iop {
             // on channel B
             _ => {
                 let n = if f < 0o160 { d } else { self.b };
-                self.p = next;
-                return self.function(channels, n, f & 0o17);
+                self.function(channels, n, f & 0o17);
             }
         }
         self.p = next;
-        CLOCK_PERIODS[f as usize] as u32
+        Did::Plain
     }
 
     /// 070 to 137.  The branch mode is f bits 2 to 0 of 070 to 077 and
@@ -671,7 +1270,7 @@ impl Iop {
     /// sums is the address of the branch itself, d is a 9-bit positive
     /// number and all sums are modulo 2**16 [HW 6-59].  A and the carry do
     /// not change.
-    fn branch(&mut self, f: u16, d: u16, k: u16) -> u32 {
+    fn branch(&mut self, f: u16, d: u16, k: u16) -> Did {
         let p = self.p;
         let mode = if f < 0o100 { f & 7 } else { f >> 2 & 7 };
         let taken = f < 0o100
@@ -682,16 +1281,17 @@ impl Iop {
                 _ => self.a != 0,
             };
         let two_parcels = mode & 5 == 5;
+        debug_assert_eq!(two_parcels, self::two_parcels(f));
         let next = p.wrapping_add(if two_parcels { 2 } else { 1 });
         if !taken {
             // "the next instruction in the current program sequence can
             // issue in the next CP" [HW 6-67]; k has to pass as well
             self.p = next;
-            return if two_parcels { 2 } else { 1 };
+            return Did::NotTaken;
         }
-        let (target, in_stack) = match mode {
-            0 | 2 => (p.wrapping_add(d), d <= IN_STACK_FORWARD),
-            1 | 3 => (p.wrapping_sub(d), d <= IN_STACK_BACKWARD),
+        let (target, did) = match mode {
+            0 | 2 => (p.wrapping_add(d), Did::Relative(d as i32)),
+            1 | 3 => (p.wrapping_sub(d), Did::Relative(-(d as i32))),
             _ => {
                 // The Program Fetch Request flag sets when operand register
                 // d holds zero, and the register of channel 1 takes d
@@ -704,18 +1304,17 @@ impl Iop {
                     self.pfr = true;
                     self.pfr_register = d;
                 }
-                (base.wrapping_add(if two_parcels { k } else { 0 }), false)
+                (
+                    base.wrapping_add(if two_parcels { k } else { 0 }),
+                    Did::Absolute,
+                )
             }
         };
         if mode & 2 != 0 {
             self.push_return(next);
         }
         self.p = target;
-        if in_stack {
-            CP_BRANCH_IN_STACK
-        } else {
-            CP_BRANCH
-        }
+        did
     }
 
     // ---- channels
@@ -743,23 +1342,24 @@ impl Iop {
     /// both alone.  The processor never waits for a channel.  A function
     /// that a channel does not have does nothing and reads zero, and so
     /// does every function of a channel number above 47 octal (spec Q9).
-    fn function(&mut self, channels: &mut dyn Channels, n: u16, function: u16) -> u32 {
+    fn function(&mut self, channels: &mut dyn Channels, n: u16, function: u16) {
         let value = match n {
             channel::IOR => self.ior(channels, function),
             channel::PFR => self.pfr_function(function),
             channel::PXS => self.pxs(function),
             channel::LME => self.lme(function),
             channel::RTC => self.rtc_function(function),
-            5..CHANNELS => channels
-                .function(&mut self.mem, n as u8, function as u8, self.a)
-                .unwrap_or(0),
+            5..CHANNELS => {
+                // the channel may move data by itself
+                self.stored = true;
+                channels
+                    .function(&mut self.mem, n as u8, function as u8, self.a)
+                    .unwrap_or(0)
+            }
             _ => 0,
         };
         if (0o10..=0o13).contains(&function) {
             self.load(value);
-            CP_FUNCTION_IN
-        } else {
-            CP_FUNCTION_OUT
         }
     }
 

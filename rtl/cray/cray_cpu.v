@@ -1,5 +1,5 @@
 // Cray CPU: instruction buffers, functional units, the 6 Mbyte channel pairs 10
-// to 17 octal (xmp_channels.v) and the memory multiplexer.  It is the CPU of a
+// to 13 octal (xmp_channels.v) and the memory multiplexer.  It is the CPU of a
 // one-processor CRAY X-MP with what the operating system COS needs of it;
 // docs/MACHINE.md lists what it does and does not have.
 //
@@ -18,6 +18,7 @@ module cray_cpu (
 	input wire i_io_clear,  // I/O Master Clear, which stops the 6 Mbyte channels
 
 	output wire        o_mem_req,
+	output wire        o_mem_code,   // it is a read of instructions
 	output wire        o_mem_we,
 	output wire [ 6:0] o_mem_len,
 	output wire [21:0] o_mem_addr,
@@ -29,20 +30,22 @@ module cray_cpu (
 	// The devices of the 6 Mbyte channels.  Element n is the pair of input
 	// channel 10 + 2n and output channel 11 + 2n octal.  Ready, Resume and
 	// Disconnect are one-clock pulses; data stays until the Resume that answers it.
-	input  wire [ 3:0] i_ch_in_ready,
-	input  wire [63:0] i_ch_in_data,
-	output wire [ 3:0] o_ch_in_resume,
-	input  wire [ 3:0] i_ch_in_disconnect,
-	output wire [ 3:0] o_ch_out_ready,
-	output wire [63:0] o_ch_out_data,
-	input  wire [ 3:0] i_ch_out_resume,
-	output wire [ 3:0] o_ch_out_disconnect,
-	output wire [ 3:0] o_ch_out_mc           // Master Clear lines of the output channels
+	input  wire [ 1:0] i_ch_in_ready,
+	input  wire [31:0] i_ch_in_data,
+	output wire [ 1:0] o_ch_in_resume,
+	input  wire [ 1:0] i_ch_in_disconnect,
+	output wire [ 1:0] o_ch_out_ready,
+	output wire [31:0] o_ch_out_data,
+	input  wire [ 1:0] i_ch_out_resume,
+	output wire [ 1:0] o_ch_out_disconnect,
+	output wire [ 1:0] o_ch_out_mc           // Master Clear lines of the output channels
 );
 
 	// instruction buffer signals
 	wire        instr_buf_mem_ce;
 	wire [21:0] instr_buf_mem_addr;
+	wire        instr_buf_mem_early;
+	wire [21:0] instr_buf_mem_early_addr;
 	wire        instr_buf_mem_vld;
 
 	// functional unit signals
@@ -52,11 +55,15 @@ module cray_cpu (
 	wire        fu_mem_ce;
 	wire [ 6:0] fu_mem_len;
 	wire        fu_mem_ack;
+	wire [2:0] xm_ce, xm_we;
+	wire [ 65:0] xm_addr;
+	wire [ 20:0] xm_len;
+	wire [191:0] xm_wdata;
 
 	wire [63:0] mem_read_data;
 
 	wire [23:0] p_addr;
-	wire        jump;
+	wire jump, jump_if, jump_issue;
 	wire [23:0] jump_addr;
 	wire [15:0] nip_nxt;
 	wire        nip_vld;
@@ -65,7 +72,7 @@ module cray_cpu (
 
 	// 6 Mbyte channels: orders from the program and what 033 reads
 	wire ch_set_ca, ch_set_cl, ch_clear, ch_k1;
-	wire [ 2:0] ch_num;
+	wire [ 1:0] ch_num;
 	wire [21:0] ch_addr;
 	wire [21:0] ch_ca;
 	wire        ch_err;
@@ -75,10 +82,12 @@ module cray_cpu (
 	//////////////////////////////////////////////////
 	//               Memory multiplexer             //
 	//////////////////////////////////////////////////
-	// requester 0: instruction buffers, 1: memory functional unit (which
-	// streams its requests), 2: the 6 Mbyte channels
+	// requester 0: instruction buffers, 1: the scalar references and the
+	// exchange, 2: the 6 Mbyte channels, 3 to 5: the memory ports A, B and C of
+	// the block and vector transfers.  All but the buffers and the channels
+	// stream their requests.
 
-	localparam NM = 3;
+	localparam NM = 6;
 
 	wire [   NM-1:0] mux_req;
 	wire [   NM-1:0] mux_we;
@@ -88,29 +97,37 @@ module cray_cpu (
 	wire [NM*64-1:0] mux_wdata;
 	wire [   NM-1:0] mux_ack;
 
-	assign mux_req[1:0]     = {fu_mem_ce, instr_buf_mem_ce};
-	assign mux_we[1:0]      = {fu_mem_wr_en, 1'b0};
-	assign mux_len[13:0]    = {fu_mem_len, 7'd16};
-	assign mux_addr[43:0]   = {fu_mem_addr, instr_buf_mem_addr};
-	assign mux_wdata[127:0] = {fu_mem_wr_data, 64'b0};
+	assign mux_req[1:0]       = {fu_mem_ce, instr_buf_mem_ce};
+	assign mux_we[1:0]        = {fu_mem_wr_en, 1'b0};
+	assign mux_len[13:0]      = {fu_mem_len, 7'd16};
+	assign mux_addr[43:0]     = {fu_mem_addr, instr_buf_mem_addr};
+	assign mux_wdata[127:0]   = {fu_mem_wr_data, 64'b0};
+	assign mux_req[5:3]       = xm_ce;
+	assign mux_we[5:3]        = xm_we;
+	assign mux_len[41:21]     = xm_len;
+	assign mux_addr[131:66]   = xm_addr;
+	assign mux_wdata[383:192] = xm_wdata;
 
 	cray_mem_mux #(
 		.N     (NM),
-		.STREAM(3'b010)
+		.STREAM(6'b111010)
 	) mem_mux (
 		.clk(clk),
 		.rst(rst),
 
-		.i_req  (mux_req),
-		.i_we   (mux_we),
-		.i_len  (mux_len),
-		.o_take (mux_take),
-		.i_addr (mux_addr),
-		.i_wdata(mux_wdata),
-		.o_ack  (mux_ack),
-		.o_rdata(mem_read_data),
+		.i_req       (mux_req),
+		.i_we        (mux_we),
+		.i_len       (mux_len),
+		.o_take      (mux_take),
+		.i_addr      (mux_addr),
+		.i_wdata     (mux_wdata),
+		.i_early     (instr_buf_mem_early),
+		.i_early_addr(instr_buf_mem_early_addr),
+		.o_ack       (mux_ack),
+		.o_rdata     (mem_read_data),
 
 		.o_mem_req  (o_mem_req),
+		.o_mem_code (o_mem_code),
 		.o_mem_we   (o_mem_we),
 		.o_mem_len  (o_mem_len),
 		.o_mem_addr (o_mem_addr),
@@ -128,19 +145,23 @@ module cray_cpu (
 	//////////////////////////////////////////////////
 
 	i_buf instr_buf (
-		.clk        (clk),
-		.rst        (rst || clear_ibufs),
-		.i_p_addr   (p_addr),
-		.i_jump     (jump),
-		.i_jump_addr(jump_addr),
-		.o_nip_nxt  (nip_nxt),
-		.o_nip_vld  (nip_vld),
-		.o_mem_ce   (instr_buf_mem_ce),
-		.o_mem_addr (instr_buf_mem_addr),
-		.i_mem_data (mem_read_data),
-		.i_mem_vld  (instr_buf_mem_vld),
-		.i_hold     (ibuf_hold),
-		.o_busy     (ibuf_busy)
+		.clk             (clk),
+		.rst             (rst || clear_ibufs),
+		.i_p_addr        (p_addr),
+		.i_jump          (jump),
+		.i_jump_if       (jump_if),
+		.i_jump_issue    (jump_issue),
+		.i_jump_addr     (jump_addr),
+		.o_nip_nxt       (nip_nxt),
+		.o_nip_vld       (nip_vld),
+		.o_mem_ce        (instr_buf_mem_ce),
+		.o_mem_addr      (instr_buf_mem_addr),
+		.o_mem_early     (instr_buf_mem_early),
+		.o_mem_early_addr(instr_buf_mem_early_addr),
+		.i_mem_data      (mem_read_data),
+		.i_mem_vld       (instr_buf_mem_vld),
+		.i_hold          (ibuf_hold),
+		.o_busy          (ibuf_busy)
 	);
 
 	//////////////////////////////////////////////////
@@ -156,6 +177,8 @@ module cray_cpu (
 		.o_clear_ibufs  (clear_ibufs),
 		.o_p_addr       (p_addr),
 		.o_jump         (jump),
+		.o_jump_if      (jump_if),
+		.o_jump_issue   (jump_issue),
 		.o_jump_addr    (jump_addr),
 		// memory interface
 		.o_mem_addr     (fu_mem_addr),
@@ -165,6 +188,13 @@ module cray_cpu (
 		.o_mem_ce       (fu_mem_ce),
 		.o_mem_len      (fu_mem_len),
 		.i_mem_take     (mux_take[1]),
+		.o_xm_ce        (xm_ce),
+		.o_xm_we        (xm_we),
+		.o_xm_addr      (xm_addr),
+		.o_xm_len       (xm_len),
+		.o_xm_wdata     (xm_wdata),
+		.i_xm_take      (mux_take[5:3]),
+		.i_xm_ack       (mux_ack[5:3]),
 		.i_mem_ack      (fu_mem_ack),
 		.i_single_step  (i_single_step),
 		.i_mcu_int      (i_mcu_int),

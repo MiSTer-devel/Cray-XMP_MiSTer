@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! cray-xmp-sys SYSTEM [--script FILE] [--ms N] [--clock YYMMDD,HHMMSS] [--log FILE]
-//!           [--poke PARCEL=VALUE]... [--two-iops] [--instant] [--timing NAME=N]...
+//!           [--poke PARCEL=VALUE]... [--three-iops] [--instant] [--timing NAME=N]...
 //!           [--save DIR] [--quiet]
 //! ```
 //!
@@ -35,7 +35,10 @@
 //! * `--clock`: give the system a clock that reads this date and time.
 //! * `--log FILE`: write every channel function and interrupt to FILE.
 //! * `--poke`: change a parcel of the kernel (hexadecimal) before it runs.
-//! * `--two-iops`: leave out the XIOP.
+//! * `--three-iops`: the I/O Subsystem the software was recovered with,
+//!   MIOP, BIOP and XIOP.  Without this it is the core's: MIOP and BIOP,
+//!   and the six parcels of the boot tape changed that tell the COS 1.17
+//!   software so (`Config::two_iops`).  Another tape is left as it is.
 //! * `--without IOP.CHANNEL`: leave a channel (octal) with nothing on it.
 //! * `--instant`: every channel operation takes no time, as in the
 //!   cray-sim simulator.
@@ -65,7 +68,7 @@ use std::process::ExitCode;
 /// Clock periods of 12.5 ns in a millisecond.
 const MILLISECOND: u64 = 80_000;
 
-const USAGE: &str = "usage: cray-xmp-sys SYSTEM [--script FILE] [--ms N] [--wait SECONDS] [--clock YYMMDD,HHMMSS] [--log FILE] [--poke PARCEL=VALUE]... [--two-iops] [--instant] [--timing NAME=N]... [--save DIR] [--quiet]";
+const USAGE: &str = "usage: cray-xmp-sys SYSTEM [--script FILE] [--ms N] [--wait SECONDS] [--clock YYMMDD,HHMMSS] [--log FILE] [--poke PARCEL=VALUE]... [--three-iops] [--instant] [--timing NAME=N]... [--save DIR] [--quiet]";
 
 struct Options {
     system: PathBuf,
@@ -75,7 +78,7 @@ struct Options {
     clock: Option<(String, String)>,
     log: Option<String>,
     pokes: Vec<(usize, u16)>,
-    two_iops: bool,
+    three_iops: bool,
     instant: bool,
     timing: Vec<(String, u32)>,
     replay: Option<(usize, String, u64)>,
@@ -93,7 +96,7 @@ fn options() -> Result<Options, String> {
         clock: None,
         log: None,
         pokes: Vec::new(),
-        two_iops: false,
+        three_iops: false,
         instant: false,
         timing: Vec::new(),
         replay: None,
@@ -136,7 +139,7 @@ fn options() -> Result<Options, String> {
                 o.pokes
                     .push(parsed.ok_or("--poke takes PARCEL=VALUE in hexadecimal")?);
             }
-            "--two-iops" => o.two_iops = true,
+            "--three-iops" => o.three_iops = true,
             "--instant" => o.instant = true,
             "--without" => {
                 let text = value("--without")?;
@@ -245,7 +248,9 @@ fn build(o: &Options) -> Result<System, String> {
         }
         config.poke_kernel(parcel, value);
     }
-    config.iops[3] = !o.two_iops;
+    if !o.three_iops && !config.two_iops() && !o.quiet {
+        eprintln!("the tape is not the COS 1.17 boot tape: it is left as it is");
+    }
     config.without = o.without.clone();
     if o.instant {
         config.timing = Timing::instant();
@@ -355,6 +360,10 @@ impl Runner {
                     } else {
                         ""
                     }
+                );
+                eprintln!(
+                    "         branches taken in the instruction stack {}, fills of the stack {}; stores into it: {} by the processor, {} by a channel",
+                    c.in_stack, c.out_of_stack, c.stack_stores, c.stack_device_stores
                 );
             }
         }

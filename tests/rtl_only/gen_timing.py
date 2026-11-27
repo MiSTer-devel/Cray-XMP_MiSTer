@@ -141,6 +141,10 @@ ONE_BUFFER = [
     (2, '176 by 1, then a PASS', ['V7 ,A0,1', 'PASS']),
     (3, '022, 176 by that step, then a PASS', ['A5 2', 'V7 ,A0,A5', 'PASS']),
     (6, '020, 176 by that step of 2000, then a PASS', ['A5 2000', 'V7 ,A0,A5', 'PASS']),
+    # the same from an address that is not 0, and five words stepping back from it
+    (8, '020 to A0, 020, 176 from there by a step of 2000, then a PASS', ['A0 24000', 'A5 2000', 'V7 ,A0,A5', 'PASS']),
+    (8, '020 to A0, 020, 176 of 5 words from there stepping back by 2000, then a PASS',
+     ['A0 24000', 'A5 77776000', 'V7 ,A0,A5', 'PASS'], 5),
     (4, '020 to A0, 177 by 1, then a PASS', ['A0 24000', ',A0,1 V7', 'PASS']),
     # A scalar reference issues in 2 CPs and what is behind it goes on (X 5-64); the next
     # one can issue behind it.  It holds for "Ah reserved or busy previous CP": a CP longer

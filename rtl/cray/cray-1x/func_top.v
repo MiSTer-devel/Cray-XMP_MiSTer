@@ -16,11 +16,20 @@ module func_top (
 	i_nip_vld,
 	o_p_addr,
 	o_jump,
+	o_jump_if,
+	o_jump_issue,
 	o_jump_addr,
 	o_clear_ibufs,
 	o_mem_ce,
 	o_mem_len,
 	i_mem_take,
+	o_xm_ce,
+	o_xm_we,
+	o_xm_addr,
+	o_xm_len,
+	o_xm_wdata,
+	i_xm_take,
+	i_xm_ack,
 	o_mem_addr,
 	i_data_from_mem,
 	o_data_to_mem,
@@ -61,12 +70,22 @@ module func_top (
 	input wire i_nip_vld;
 	output wire [23:0] o_p_addr;
 	output wire o_jump;  // a branch is taken this clock
+	output wire o_jump_if;  // one is taken if the current instruction issues
+	output wire o_jump_issue;  // and it issues: the two together are o_jump
 	output wire [23:0] o_jump_addr;  // to this address, as o_p_addr gives one
 	output wire o_clear_ibufs;
 	//memory interface
 	output wire o_mem_ce;
 	output wire [6:0] o_mem_len;
 	input wire i_mem_take;
+	//the three memory ports of the block and vector transfers (mem_fu.v)
+	output wire [2:0] o_xm_ce;
+	output wire [2:0] o_xm_we;
+	output wire [65:0] o_xm_addr;
+	output wire [20:0] o_xm_len;
+	output wire [191:0] o_xm_wdata;
+	input wire [2:0] i_xm_take;
+	input wire [2:0] i_xm_ack;
 	output wire [21:0] o_mem_addr;
 	input wire [63:0] i_data_from_mem;
 	output reg [63:0] o_data_to_mem;
@@ -79,7 +98,7 @@ module func_top (
 	output wire o_ch_set_cl;  // 0011: enter the limit address
 	output wire o_ch_clear;  // 0012: clear the flags and stop
 	output wire o_ch_k1;  // 0012j1
-	output wire [2:0] o_ch_num;  // channel number less 10 octal, also for the read
+	output wire [1:0] o_ch_num;  // channel number less 10 octal, also for the read
 	output wire [21:0] o_ch_addr;
 	input wire [21:0] i_ch_ca;  // current address of channel o_ch_num
 	input wire i_ch_err;  // its error flag
@@ -142,6 +161,7 @@ module func_top (
 	wire [ 7:0] s_wait_mask;
 
 	wire [63:0] t_jk_data;
+	wire [63:0] t_mem_data;  //the T register a block transfer asks for
 	wire [ 5:0] t_wr_addr;
 	wire [ 5:0] t_rd_addr;
 	wire [63:0] t_wr_data;
@@ -167,6 +187,7 @@ module func_top (
 	wire [ 7:0] a_wait_mask;
 
 	wire [23:0] b_jk_data;
+	wire [23:0] b_mem_data;  //the B register a block transfer asks for
 	wire [23:0] b_wr_data;
 	wire [ 5:0] b_wr_addr;
 	wire [ 5:0] b_rd_addr;
@@ -190,11 +211,11 @@ module func_top (
 	wire        mem_type;
 	wire        mem_issue;  // the memory unit lets the current instruction issue
 	wire        vmem_issue;
-	wire sc_ready, blk_ready;
+	wire sc_ready, blk_ready, ld_ready, st_ready;
 	wire sc_pending;  // a scalar reference has issued and is not done
 	wire sc_a_v, sc_s_v;  // the word of a scalar load is at the registers in the next clock
 	wire [2:0] sc_num;
-	wire blk_b, blk_t;  // a block transfer has the B or the T registers
+	wire blk_b_rd, blk_b_wr, blk_t_rd, blk_t_wr;  // a block transfer is reading or writing the B or the T registers
 	wire        vmem_unsure;  // a block or vector transfer may still leave the field: what is behind it waits
 	wire        mem_ce;
 	wire [ 6:0] mem_len;
@@ -328,7 +349,7 @@ module func_top (
 	//V-type scheduler signals
 	wire [       7:0] vwrite_start;
 	wire [       7:0] vread_start;
-	wire [       8:0] vfu_start;
+	wire [       9:0] vfu_start;
 	wire [       7:0] vreg_busy;
 	wire [       7:0] vreg_reading;
 	wire [       7:0] vreg_result;
@@ -337,7 +358,7 @@ module func_top (
 	wire [       7:0] vreg_filling;
 	wire [   7*8-1:0] vreg_filled;
 	wire [       7:0] vreg_step;
-	wire [       8:0] vfu_busy;
+	wire [       9:0] vfu_busy;
 	wire [(64*8-1):0] v_rd_data;
 	wire              v_rdy;  // the V registers and the unit of the current instruction are free for it
 	wire              v_type;
@@ -405,7 +426,7 @@ module func_top (
 	//reserved or busy previous CP"; what uses the B or the T registers waits for a
 	//block transfer of them, "instruction 034 or 035 in process" (CSM-0111000 pages
 	//5-20, 5-31, 5-60, 5-64)
-	wire mem_hold = (|(pd[PD_AH+:8] & a_res_mask)) || (pd[PD_USE_B] && blk_b) || (pd[PD_USE_T] && blk_t);
+	wire mem_hold = (|(pd[PD_AH+:8] & a_res_mask)) || (pd[PD_USE_B] && (blk_b_rd || blk_b_wr)) || (pd[PD_USE_T] && (blk_t_rd || blk_t_wr));
 	assign opnd_busy = (|(rd_a & a_wait_mask)) || (|(rd_s & s_wait_mask)) || vec_hold || mode_hold || ts_wait || (pd[PD_H074] && tw_en) || (pd[PD_H024] && bw_en) || vmem_unsure || mem_hold;
 
 	//////////////////////////////////////////
@@ -513,16 +534,27 @@ module func_top (
 	//would stand in front of the next instruction's validity and the way into
 	//CIP.  While the CPU exchanges it takes the sum itself, and is right when
 	//the CPU runs again.
-	reg [23:0] p_fetch;
+	//
+	//Whether the instruction issues is known last of all in a clock, and P, this
+	//register and the buffers' address registers hang on it.  So where each goes
+	//if the instruction issues is formed beside the issue logic (the _if values,
+	//kept as they are written), and the issue itself only picks between that
+	//and staying.
+	wire        p_moves = nip_in_vld || take_branch;  // P moves if the instruction issues
+	(* keep *)wire [23:0] p_fetch_if = p_moves ? (take_branch ? o_jump_addr : p_fetch + 24'd1) : p_fetch;
+	reg  [23:0] p_fetch;
 	always @(posedge clk)
 		if (rst) p_fetch <= 24'b0;
-		else if (!x_swap)
-			p_fetch <= (issue_vld && (nip_in_vld || take_branch)) ? (take_branch ? o_jump_addr : p_fetch + 24'd1) : p_fetch;
+		else if (!x_swap) p_fetch <= issue_vld ? p_fetch_if : p_fetch;
 		else p_fetch <= p_addr + {instr_base_addr[21:0], 2'b0};
-	assign o_p_addr    = p_fetch;
-	//and are told of a branch in the clock it is taken, with where it goes
-	assign o_jump      = !x_swap && issue_vld && take_branch;
-	assign o_jump_addr = p_target + {instr_base_addr[21:0], 2'b0};
+	assign o_p_addr     = p_fetch;
+	//and are told of a branch in the clock it is taken, with where it goes: of
+	//the branch that is taken if the instruction issues (o_jump_if), and of the
+	//issue (o_jump_issue)
+	assign o_jump_if    = !x_swap && take_branch;
+	assign o_jump_issue = issue_vld;
+	assign o_jump       = o_jump_if && issue_vld;
+	assign o_jump_addr  = p_target + {instr_base_addr[21:0], 2'b0};
 
 	// Outgoing package word (CSM-0111000 figure 3-3):
 	//   word 0  P [47:24]                                             A0 [23:0]
@@ -1011,15 +1043,17 @@ localparam VLOG      = 3'b000,   //vector logical
 	//the reciprocal and the population count are both "174 in process": one at a time
 	assign vfu_busy[5] = fp_ra_busy | vpop_busy;
 	assign vfu_busy[6] = fp_ra_busy | vpop_busy;
-	assign vfu_busy[7] = mem_busy;
+	//the memory ports: a 176 needs port A or B, a 177 port C (mem_fu.v)
+	assign vfu_busy[7] = !ld_ready;
 	assign vfu_busy[8] = fp_mul_busy;
+	assign vfu_busy[9] = !st_ready;
 	//The second vector logical unit (CSM-0111000 page 4-18).  It is in the floating
 	//point multiply unit, with which it shares the way in and the way out: one is
 	//busy when the other is.  A 140 to 145 goes there when the package enables it
 	//(ESVL) and it is free, and to the full unit otherwise; the merges and 175 can
 	//only use the full unit.
 	wire       svl_take = pd[PD_SVL] && mode_esvl && !fp_mul_busy;
-	wire [8:0] v_fu = svl_take ? 9'b1_0000_0000 : {1'b0, pd[PD_V_FU+:8]};
+	wire [9:0] v_fu = svl_take ? 10'b01_0000_0000 : (cip_instr == 7'o177) ? 10'b10_0000_0000 : {2'b0, pd[PD_V_FU+:8]};
 	assign mem_idle = !mem_busy;
 	assign v_type   = pd[PD_VTYPE];
 	assign mem_type = pd[PD_MTYPE];
@@ -1196,13 +1230,18 @@ localparam VLOG      = 3'b000,   //vector logical
 
 	//a vector load (176) writes one element per word read; a vector store (177) reads
 	//the element the memory unit is about to write
-	wire       vmem_wr;  //o_mem_data holds element vmem_wr_idx of a 176
-	wire       vmem_wr_last;  //and it is the last
-	wire [5:0] vmem_wr_idx;
-	wire [5:0] vmem_rd_idx;
-	wire [7:0] vmem_reads;  //a vector transfer is reading this V register
-	wire [2:0] vmem_num;  //the V register of the vector transfer under way
-	wire [2:0] vmem_knum;  //the one with the addresses of a gather or scatter
+	//the three memory ports (mem_fu.v): A and B load V registers, C stores them
+	wire [  2:0] vmem_wr;  //the port's word holds element vmem_wr_idx of a 176
+	wire [  2:0] vmem_wr_last;  //and it is the last
+	wire [ 17:0] vmem_wr_idx;
+	wire [ 17:0] vmem_rd_idx;
+	wire [191:0] vmem_data;
+	wire [ 23:0] vmem_reads;  //a vector transfer of the port is reading this V register
+	wire [  8:0] vmem_num;  //the V register of the vector transfer under way
+	wire [  8:0] vmem_knum;  //the one with the addresses of a gather or scatter
+	wire [2:0] vmem_avail, vmem_kavail;
+	//the V registers read by the ports, and by which
+	wire [7:0] vread_any = vmem_reads[7:0] | vmem_reads[15:8] | vmem_reads[23:16];
 
 	//077 writes its element in the clock after it issues.  Nothing can tell: the
 	//register is free when a 077 issues, and whatever issues next reads a V
@@ -1298,7 +1337,8 @@ localparam VLOG      = 3'b000,   //vector logical
 			//index or a 077 ((Sj) to element (Ak), issued in the clock before); and
 			//whether that is the last of a result (wr_last).  One of them at a time,
 			//gathered with one bit a source.
-			wire           vm_hit = vmem_wr && (vmem_num == gr);
+			wire           vm_hit_a = vmem_wr[0] && (vmem_num[2:0] == gr);
+			wire           vm_hit_b = vmem_wr[1] && (vmem_num[5:3] == gr);
 			wire           pop_hit = pop_valid && (tk_out_dest[NVW] == gr);
 			wire           ci_hit = ci_wr_valid && (ci_wr_dest == gr);
 			reg            unit_hit;
@@ -1318,33 +1358,33 @@ localparam VLOG      = 3'b000,   //vector logical
 					unit_data = unit_data | ({64{vw_hit[u][gr]}} & vw_data[u]);
 				end
 			end
-			wire wr_en = sw_en[gr] | vm_hit | unit_hit | pop_hit | (ci_hit & ci_wr_en);
-			wire wr_last = (vm_hit & vmem_wr_last) | unit_last | (pop_hit & tk_out_last[NVW]) | (ci_hit & ci_wr_last);
-			wire [ 5:0] wr_idx = ({6{sw_en[gr]}} & sw_idx) | ({6{vm_hit}} & vmem_wr_idx) | unit_idx | ({6{pop_hit}} & tk_out_idx[NVW]) | ({6{ci_hit}} & ci_wr_ptr);
-			wire [63:0] wr_data = ({64{sw_en[gr]}} & sw_data) | ({64{vm_hit}} & data_from_mem_to_regs) | unit_data | ({64{pop_hit}} & fu_out[NVW]) | ({64{ci_hit}} & {58'b0, ci_wr_num});
+			wire wr_en = sw_en[gr] | vm_hit_a | vm_hit_b | unit_hit | pop_hit | (ci_hit & ci_wr_en);
+			wire wr_last = (vm_hit_a & vmem_wr_last[0]) | (vm_hit_b & vmem_wr_last[1]) | unit_last | (pop_hit & tk_out_last[NVW]) | (ci_hit & ci_wr_last);
+			wire [ 5:0] wr_idx = ({6{sw_en[gr]}} & sw_idx) | ({6{vm_hit_a}} & vmem_wr_idx[5:0]) | ({6{vm_hit_b}} & vmem_wr_idx[11:6]) | unit_idx | ({6{pop_hit}} & tk_out_idx[NVW]) | ({6{ci_hit}} & ci_wr_ptr);
+			wire [63:0] wr_data = ({64{sw_en[gr]}} & sw_data) | ({64{vm_hit_a}} & vmem_data[63:0]) | ({64{vm_hit_b}} & vmem_data[127:64]) | unit_data | ({64{pop_hit}} & fu_out[NVW]) | ({64{ci_hit}} & {58'b0, ci_wr_num});
 
 			v_regfile vreg (
-				.clk       (clk),
-				.rst       (rst),
+				.clk(clk),
+				.rst(rst),
 				.i_rd_start(vread_start[gr] && !mem_type),
-				.i_rd_step (vreg_step[gr]),
-				.i_len     (vl_count),
+				.i_rd_step(vreg_step[gr]),
+				.i_len(vl_count),
 				.i_elem_idx(a_k_data[5:0]),
-				.i_mem_rd  (vmem_reads[gr]),
-				.i_mem_idx (vmem_rd_idx),
-				.o_rd_data (v_rd_data[64*gr+:64]),
+				.i_mem_rd(vread_any[gr]),
+				.i_mem_idx (vmem_reads[gr] ? vmem_rd_idx[5:0] : vmem_reads[8+gr] ? vmem_rd_idx[11:6] : vmem_rd_idx[17:12]),
+				.o_rd_data(v_rd_data[64*gr+:64]),
 				.i_wr_start(vwrite_start[gr]),
-				.i_wr_last (wr_last),
-				.i_wr_en   (wr_en),
-				.i_wr_idx  (wr_idx),
-				.i_wr_data (wr_data),
-				.o_busy    (vreg_busy[gr]),
-				.o_reading (vreg_reading[gr]),
-				.o_result  (vreg_result[gr]),
-				.o_coming  (vreg_coming[gr]),
-				.o_come    (vreg_come[7*gr+:7]),
-				.o_filling (vreg_filling[gr]),
-				.o_filled  (vreg_filled[7*gr+:7])
+				.i_wr_last(wr_last),
+				.i_wr_en(wr_en),
+				.i_wr_idx(wr_idx),
+				.i_wr_data(wr_data),
+				.o_busy(vreg_busy[gr]),
+				.o_reading(vreg_reading[gr]),
+				.o_result(vreg_result[gr]),
+				.o_coming(vreg_coming[gr]),
+				.o_come(vreg_come[7*gr+:7]),
+				.o_filling(vreg_filling[gr]),
+				.o_filled(vreg_filled[7*gr+:7])
 			);
 		end
 	endgenerate
@@ -1385,6 +1425,8 @@ localparam VLOG      = 3'b000,   //vector logical
 		.i_now_lane({3'b000, s_now_lane}),
 		.i_now_d   (pd[PD_S_DNUM+:3]),
 		.o_data    ({s_i_data, s_k_raw, s_j_raw}),
+		.o_sel     (),
+		.o_r0      (),
 		.i_ex_addr (s_ex_addr),
 		.o_ex_data (s_ex_data),
 		.o_r0_neg  (s_r0_neg),
@@ -1405,12 +1447,14 @@ localparam VLOG      = 3'b000,   //vector logical
 		.DEPTH   (64),
 		.LOGDEPTH(6)
 	) t_rf (
-		.clk      (clk),
-		.i_jk_addr(t_rd_addr),
-		.o_jk_data(t_jk_data),
-		.i_wr_addr(t_wr_addr),
-		.i_wr_data(t_wr_data),
-		.i_wr_en  (t_result_en)
+		.clk       (clk),
+		.i_jk_addr (t_rd_addr),
+		.o_jk_data (t_jk_data),
+		.i_mem_addr(mem_t_rd_addr),
+		.o_mem_data(t_mem_data),
+		.i_wr_addr (t_wr_addr),
+		.i_wr_data (t_wr_data),
+		.i_wr_en   (t_result_en)
 	);
 
 	//075 writes (Si) to Tjk in the clock after it issues, which keeps the issue logic
@@ -1425,15 +1469,17 @@ localparam VLOG      = 3'b000,   //vector logical
 		tw_data <= s_i_data;
 	end
 
-	assign t_rd_addr   = blk_t ? mem_t_rd_addr : {cip_j, cip_k};
+	assign t_rd_addr   = {cip_j, cip_k};
 	assign t_wr_addr   = tw_en ? tw_addr : mem_t_wr_addr;
-	assign t_wr_data   = tw_en ? tw_data : data_from_mem_to_regs;
+	assign t_wr_data   = tw_en ? tw_data : mem_t_wr_data;
 	assign t_result_en = mem_t_wr_en || tw_en;
 
 	//The A registers.  Port 0 reads Aj, port 1 Ak and port 3 Ah, each nothing for
 	//register 0 (and Ak then is 1); port 2 Ai; port 4 A0.
 	wire [23:0] a_k_raw;
 	wire a_r0_neg, a_r0_zero;
+	wire [5*(AB_N+1)-1:0] a_rf_sel;  //for each read port: the register or the lane it reads
+	wire [          23:0] a_r0_data;  //A0 as it stands in its register
 	res_regfile #(
 		.W   (24),
 		.NL  (AB_N),
@@ -1458,6 +1504,8 @@ localparam VLOG      = 3'b000,   //vector logical
 		.i_now_lane({4'b0000, a_now_lane}),
 		.i_now_d   (pd[PD_A_DNUM+:3]),
 		.o_data    ({a_a0_data, a_h_data, a_i_data, a_k_raw, a_j_data}),
+		.o_sel     (a_rf_sel),
+		.o_r0      (a_r0_data),
 		.i_ex_addr (a_ex_addr),
 		.o_ex_data (a_ex_data),
 		.o_r0_neg  (a_r0_neg),
@@ -1496,6 +1544,8 @@ localparam VLOG      = 3'b000,   //vector logical
 		.clk       (clk),
 		.i_jk_addr (b_rd_addr),
 		.o_jk_data (b_jk_data),
+		.i_mem_addr(mem_b_rd_addr),
+		.o_mem_data(b_mem_data),
 		.i_wr_addr (b_wr_addr),
 		.i_wr_data (b_wr_data),
 		.i_wr_en   (b_write_en),
@@ -1505,11 +1555,11 @@ localparam VLOG      = 3'b000,   //vector logical
 
 	//Figure out when and what we should write into the B register file
 	assign b_wr_addr  = bw_en ? bw_addr : mem_b_wr_addr;
-	assign b_wr_data  = bw_en ? bw_data : data_from_mem_to_regs[23:0];
+	assign b_wr_data  = bw_en ? bw_data : mem_b_wr_data;
 	assign b_write_en = bw_en || mem_b_wr_en;
 
 	//and figure out what address to read from
-	assign b_rd_addr = blk_b ? mem_b_rd_addr : {cip_j, cip_k};
+	assign b_rd_addr = {cip_j, cip_k};
 
 	//////////////////////////////////////////////////
 	//           Vector Units                       //
@@ -1758,15 +1808,27 @@ localparam VLOG      = 3'b000,   //vector logical
 	//not change while it runs, and a register only ever gets fuller, so the
 	//transfer at worst waits a clock longer for an element.  (The first element
 	//is asked for three clocks after the start at the earliest.)
-	reg vmem_fill, vmem_kfill;
-	reg [6:0] vmem_fill_n, vmem_kfill_n;
-	always @(posedge clk) begin
-		vmem_fill    <= vreg_filling[vmem_num];
-		vmem_fill_n  <= vreg_filled[7*vmem_num+:7];
-		vmem_kfill   <= vreg_filling[vmem_knum];
-		vmem_kfill_n <= vreg_filled[7*vmem_knum+:7];
-	end
+	reg [2:0] vmem_fill, vmem_kfill;
+	reg     [6:0] vmem_fill_n [0:2];
+	reg     [6:0] vmem_kfill_n[0:2];
+	integer       vp;
+	always @(posedge clk)
+		for (vp = 0; vp < 3; vp = vp + 1) begin
+			vmem_fill[vp]    <= vreg_filling[vmem_num[3*vp+:3]];
+			vmem_fill_n[vp]  <= vreg_filled[7*vmem_num[3*vp+:3]+:7];
+			vmem_kfill[vp]   <= vreg_filling[vmem_knum[3*vp+:3]];
+			vmem_kfill_n[vp] <= vreg_filled[7*vmem_knum[3*vp+:3]+:7];
+		end
+	genvar vq;
+	generate
+		for (vq = 0; vq < 3; vq = vq + 1) begin : g_vmem_avail
+			assign vmem_avail[vq]  = !vmem_fill[vq] || ({1'b0, vmem_rd_idx[6*vq+:6]} < vmem_fill_n[vq]);
+			assign vmem_kavail[vq] = !vmem_kfill[vq] || ({1'b0, vmem_rd_idx[6*vq+:6]} < vmem_kfill_n[vq]);
+		end
+	endgenerate
 
+	wire [63:0] mem_t_wr_data;
+	wire [23:0] mem_b_wr_data;
 	mem_fu mfu (
 		.clk              (clk),
 		.rst              (rst),
@@ -1775,7 +1837,9 @@ localparam VLOG      = 3'b000,   //vector logical
 		.i_scalar         (pd[PD_SCREF]),
 		.i_block          (pd[PD_BLOCK]),
 		.i_vector_length  (vector_length),
-		.i_vstart         (vfu_start[7]),
+		.i_vstart_ld      (vfu_start[7]),
+		.i_vstart_st      (vfu_start[9]),
+		.i_bdm            (mode_bdm),
 		.i_data_base_addr (data_base_addr),
 		.i_data_limit_addr(data_limit_addr),
 		//interface to V regs
@@ -1787,14 +1851,20 @@ localparam VLOG      = 3'b000,   //vector logical
 		.i_v5_data        (v_rd_data[383:320]),
 		.i_v6_data        (v_rd_data[447:384]),
 		.i_v7_data        (v_rd_data[511:448]),
-		.o_v_wr           (vmem_wr),
-		.o_v_last         (vmem_wr_last),
-		.o_v_wr_idx       (vmem_wr_idx),
-		.o_v_rd_idx       (vmem_rd_idx),
-		.i_v_avail        (!vmem_fill || ({1'b0, vmem_rd_idx} < vmem_fill_n)),
-		.i_vk_avail       (!vmem_kfill || ({1'b0, vmem_rd_idx} < vmem_kfill_n)),
+		.o_xv_wr          (vmem_wr),
+		.o_xv_last        (vmem_wr_last),
+		.o_xv_wr_idx      (vmem_wr_idx),
+		.o_xv_rd_idx      (vmem_rd_idx),
+		.o_xv_data        (vmem_data),
+		.i_xv_avail       (vmem_avail),
+		.i_xvk_avail      (vmem_kavail),
+		.o_xv_num         (vmem_num),
+		.o_xvk_num        (vmem_knum),
+		.o_xv_reads       (vmem_reads),
 		//interface to A rf
 		.i_a0_data        (a_a0_data),
+		.i_a0_srcs        ({a_r0_data, a_bus_data}),
+		.i_a0_sel         (a_rf_sel[4*(AB_N+1)+:AB_N+1]),
 		.i_ai_data        (a_i_data),
 		.i_ak_data        (a_k_data),
 		.i_ah_data        (a_h_data[21:0]),
@@ -1803,37 +1873,47 @@ localparam VLOG      = 3'b000,   //vector logical
 		.i_si_data        (s_i_data),
 		.o_sc_s           (sc_s_v),
 		.o_sc_num         (sc_num),
+		.o_sc_data        (data_from_mem_to_regs),
 		//interface to B rf
 		.o_b_rd_addr      (mem_b_rd_addr),
-		.i_b_rd_data      (b_jk_data),
+		.i_b_rd_data      (b_mem_data),
 		.o_b_wr_addr      (mem_b_wr_addr),
 		.o_b_wr_en        (mem_b_wr_en),
+		.o_b_wr_data      (mem_b_wr_data),
 		//interface to T rf
 		.o_t_rd_addr      (mem_t_rd_addr),
-		.i_t_rd_data      (t_jk_data),
+		.i_t_rd_data      (t_mem_data),
 		.o_t_wr_addr      (mem_t_wr_addr),
 		.o_t_wr_en        (mem_t_wr_en),
+		.o_t_wr_data      (mem_t_wr_data),
 		//memory interface
 		.o_mem_busy       (mem_busy),
 		.o_range_err      (mem_range_err),
 		.o_mem_ce         (mem_ce),
 		.o_mem_len        (mem_len),
 		.i_mem_take       (i_mem_take && !x_swap),
-		.o_mem_data       (data_from_mem_to_regs),
 		.o_mem_addr       (mem_addr),
-		.i_mem_rd_data    (i_data_from_mem),
 		.o_mem_wr_data    (data_to_mem),
 		.o_mem_wr_en      (mem_wr_en),
 		.i_mem_ack        (mem_ack),
+		.o_xm_ce          (o_xm_ce),
+		.o_xm_we          (o_xm_we),
+		.o_xm_addr        (o_xm_addr),
+		.o_xm_len         (o_xm_len),
+		.o_xm_wdata       (o_xm_wdata),
+		.i_xm_take        (i_xm_take),
+		.i_xm_ack         (i_xm_ack),
+		.i_mem_rd_data    (i_data_from_mem),
 		.o_sc_ready       (sc_ready),
 		.o_blk_ready      (blk_ready),
+		.o_ld_ready       (ld_ready),
+		.o_st_ready       (st_ready),
 		.o_mem_issue      (vmem_issue),
 		.i_issue          (cip_issue),
-		.o_v_num          (vmem_num),
-		.o_vk_num         (vmem_knum),
-		.o_v_reads        (vmem_reads),
-		.o_blk_b          (blk_b),
-		.o_blk_t          (blk_t),
+		.o_blk_b_rd       (blk_b_rd),
+		.o_blk_b_wr       (blk_b_wr),
+		.o_blk_t_rd       (blk_t_rd),
+		.o_blk_t_wr       (blk_t_wr),
 		.o_unsure         (vmem_unsure),
 		.o_sc_pending     (sc_pending)
 	);
@@ -1927,27 +2007,29 @@ localparam VLOG      = 3'b000,   //vector logical
 	/////////////////////////////////////////////////////////
 	//  0010jk  CA,Aj Ak    0011jk  CL,Aj Ak    0012j0  CI,Aj    0012j1  MC,Aj
 	//act in monitor mode when j is not 0 and the low four bits of (Aj) name a channel
-	//from 10 to 17 octal (CSM-0111000 pages 5-9 and 5-37).  An order reaches the
+	//from 10 to 13 octal (CSM-0111000 pages 5-9 and 5-37; this mainframe has the two
+	//pairs of one I/O port, see xmp_channels.v).  An order reaches the
 	//channels the clock after its instruction issues.  033 reads them in that same
 	//later clock, so a 033 right behind a 0012 sees what the 0012 did:
 	//  033i0x  Ai CI       033ij0  Ai CA,Aj    033ij1  Ai CE,Aj
 	//The result is due four clocks after issue.
 	reg ch_set_ca, ch_set_cl, ch_clear, ch_k1;
-	reg [ 2:0] ch_num;
+	reg [ 1:0] ch_num;
 	reg [21:0] ch_addr;
 	reg ch_rd_int, ch_rd_none, ch_rd_err;
 	reg [23:0] ch_rd1, ch_rd2;
-	wire ch_order = cip_issue && mode_mm && (cip[15:9] == 7'o001) && (cip_j != 3'd0) && a_j_data[3];
+	wire ch_named = (a_j_data[3:2] == 2'b10);  // (Aj) names one of the channels there are
+	wire ch_order = cip_issue && mode_mm && (cip[15:9] == 7'o001) && (cip_j != 3'd0) && ch_named;
 
 	always @(posedge clk) begin
 		ch_set_ca <= !rst && ch_order && (cip[8:6] == 3'd0);
 		ch_set_cl <= !rst && ch_order && (cip[8:6] == 3'd1);
 		ch_clear <= !rst && ch_order && (cip[8:6] == 3'd2);
 		ch_k1 <= (cip_k == 3'd1);
-		ch_num <= a_j_data[2:0];
+		ch_num <= a_j_data[1:0];
 		ch_addr <= a_k_data[21:0];
 		ch_rd_int <= (cip_j == 3'd0);
-		ch_rd_none <= !a_j_data[3];
+		ch_rd_none <= !ch_named;
 		ch_rd_err <= cip_k[0];
 		ch_rd1 <= ch_rd_int ? {20'b0, i_ch_int_num} : ch_rd_none ? 24'b0 : ch_rd_err ? {23'b0, i_ch_err} : {2'b0, i_ch_ca};
 		ch_rd2 <= ch_rd1;
@@ -2067,7 +2149,7 @@ localparam VLOG      = 3'b000,   //vector logical
 		.i_s0_nzero    (s0_nzero),
 		.i_s0_busy     (s0_busy),
 		.i_bjk         (b_jk_data),
-		.i_b_written   (bw_en || blk_b),
+		.i_b_written   (bw_en || blk_b_wr),
 		.o_branch_type (branch_type),
 		.o_branch_issue(branch_issue),
 		.o_take_branch (take_branch),
@@ -2079,10 +2161,10 @@ localparam VLOG      = 3'b000,   //vector logical
 	//Program Counter
 	//If it's not a branch, increment when we issue the current instruction parcel
 	//If it *is* a branch, jump to the appropriate destination
+	(* keep *) wire [23:0] p_addr_if = p_moves ? (take_branch ? p_target : p_behind) : p_addr;
 	always @(posedge clk)
 		if (rst) p_addr <= 24'b0;
-		else if (!x_swap)
-			p_addr <= (issue_vld && (nip_in_vld || take_branch)) ? (take_branch ? p_target : p_behind) : p_addr;
+		else if (!x_swap) p_addr <= issue_vld ? p_addr_if : p_addr;
 		else if (x_load && (x_cnt == 4'b0000)) p_addr <= x_data[47:24];
 
 	reg alert;

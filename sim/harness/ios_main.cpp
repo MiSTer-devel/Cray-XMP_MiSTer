@@ -1,4 +1,4 @@
-// The I/O Subsystem (rtl/ios/ios.v: three I/O Processors and their consoles)
+// The I/O Subsystem (rtl/ios/ios.v: two I/O Processors and their consoles)
 // booting its kernel, with stand-ins for what the hardware is given from
 // outside: Buffer Memory, central memory, the file that is the boot tape, and
 // the sectors of the Peripheral Expander's disk and of the BIOP's nine drives.
@@ -21,7 +21,7 @@
 // --burst a key is held out the moment the one before has been taken, not a
 // few milliseconds later.  Both
 // TEXTs can begin with @C: for another console: 0 is the station, 3 the
-// operator's, 4 the BIOP's, 5 the XIOP's.  --screen C prints that console as
+// operator's, 4 the BIOP's.  --screen C prints that console as
 // its 24 lines at the end.  --poke changes a parcel of the kernel (hexadecimal).
 // --mount puts the tape file FILE on the Peripheral Expander's drive once TEXT
 // has been shown, in its turn among the --type; the file is not written to:
@@ -41,14 +41,14 @@
 #include "Vxmp_machine.h"
 #include "Vxmp_machine___024root.h"
 typedef Vxmp_machine Top;
-#define LOCAL_MEMORY(n) in->xmp_machine__DOT__subsystem__DOT__core__DOT__g_iop__BRA__##n##__KET____DOT__u__DOT__mem
+#define LOCAL_MEMORY(n, part) in->xmp_machine__DOT__subsystem__DOT__core__DOT__g_iop__BRA__##n##__KET____DOT__u__DOT__mem_##part
 // the CPU and the I/O Subsystem have the same clock here
 #define CLK(v) do { top->clk = (v); top->clk_ios = (v); } while (0)
 #else
 #include "Vios.h"
 #include "Vios___024root.h"
 typedef Vios Top;
-#define LOCAL_MEMORY(n) in->ios__DOT__core__DOT__g_iop__BRA__##n##__KET____DOT__u__DOT__mem
+#define LOCAL_MEMORY(n, part) in->ios__DOT__core__DOT__g_iop__BRA__##n##__KET____DOT__u__DOT__mem_##part
 #define CLK(v) top->clk = (v)
 #endif
 #include "verilated.h"
@@ -76,13 +76,13 @@ int main(int argc, char **argv) {
     int until_console = 3;
     std::vector<int> screens;
     // a text may name its console: @C:TEXT
-    auto on_console = [](std::string &text) { int c = 3; if (text.size() > 3 && text[0] == '@' && text[2] == ':') { c = text[1] - '0'; text = text.substr(3); } return c < 0 || c > 5 ? 3 : c; };
+    auto on_console = [](std::string &text) { int c = 3; if (text.size() > 3 && text[0] == '@' && text[2] == ':') { c = text[1] - '0'; text = text.substr(3); } return c < 0 || c > 4 ? 3 : c; };
     std::vector<std::pair<int, std::string>> drive_files;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() { return std::string(i + 1 < argc ? argv[++i] : ""); };
         if (a == "--until") { until = next(); until_console = on_console(until); until = squeeze(until); }
-        else if (a == "--screen") screens.push_back(atoi(next().c_str()) % 6);
+        else if (a == "--screen") screens.push_back(atoi(next().c_str()) % 5);
         else if (a == "--type") {
             std::string t = next(), keys; size_t eq = t.find('=');
             if (eq == std::string::npos) { fprintf(stderr, "--type takes TEXT=KEYS\n"); return 2; }
@@ -116,6 +116,7 @@ int main(int argc, char **argv) {
     std::vector<uint8_t> kernel = read_file(files[0]);
     std::vector<uint8_t> tape = read_file(files[1]);
     if (kernel.empty() || tape.empty()) { fprintf(stderr, "cannot read the kernel or the tape\n"); return 2; }
+    two_iops(tape);
     SectorDisks disk(1, 512), drives(9, 4096), reel(1, 512);
     std::string reel_path;
     int mounting = 0;
@@ -143,11 +144,15 @@ int main(int argc, char **argv) {
     Top *top = new Top;
     auto *in = top->rootp;
     // Local Memory holds something at power-up; zero is as good as anything
-    for (int i = 0; i < 65536; i++) { LOCAL_MEMORY(0)[i] = 0; LOCAL_MEMORY(1)[i] = 0; LOCAL_MEMORY(2)[i] = 0; }
+    // (a parcel is kept in two memories, see rtl/ios/iop.v)
+    for (int i = 0; i < 65536; i++) {
+        LOCAL_MEMORY(0, lo)[i] = 0; LOCAL_MEMORY(1, lo)[i] = 0;
+        LOCAL_MEMORY(0, hi)[i] = 0; LOCAL_MEMORY(1, hi)[i] = 0;
+    }
     CLK(0); top->rst = 1;
     top->i_real = real_times;
     top->i_bm_ack = 0; top->i_bm_rdata = 0;
-    top->i_key_valid = 0; top->i_key = 0; top->i_char_ready = 077;
+    top->i_key_valid = 0; top->i_key = 0; top->i_char_ready = 037;
     top->i_tape_ack = 0; top->i_tape_data = 0; top->i_tape_bytes = tape.size();
     top->i_sd_ack = 0; top->i_sd_buff_addr = 0; top->i_sd_buff_dout = 0; top->i_sd_buff_wr = 0;
     top->i_reel_mounted = 0; top->i_reel_blocks = 0; top->i_reel_readonly = 0;
@@ -164,9 +169,9 @@ int main(int argc, char **argv) {
     top->i_cm_ack = 0; top->i_cm_rdata = 0;
     top->i_drive_ack = 0; top->i_drive_buff_addr = 0; top->i_drive_buff_dout = 0; top->i_drive_buff_wr = 0;
 
-    std::string console[6];                              // what each console was sent
-    Shown on[6];                                         // and what the benches look for in it
-    long clocks = 0, steps[3] = {0, 0, 0};
+    std::string console[5];                              // what each console was sent
+    Shown on[5];                                         // and what the benches look for in it
+    long clocks = 0, steps[2] = {0, 0};
     bool shown = until.empty();
     size_t printed = 0, said = 0, at_key = 0;
     long waited = 0;
@@ -198,7 +203,7 @@ int main(int argc, char **argv) {
         bool print_taken = top->o_print_valid && top->i_print_ready;
         if (print_taken) printed_text.push_back(top->o_print);
         // a character a console holds out is taken in this clock
-        for (int c = 0; c < 6; c++)
+        for (int c = 0; c < 5; c++)
             if (top->o_char_valid >> c & 1) { unsigned char ch = top->o_char >> (7 * c) & 0x7F; console[c].push_back(ch); on[c].put(ch); }
         bool key_taken = top->i_key_valid & top->o_key_ready;
         CLK(1); top->eval();
@@ -265,7 +270,7 @@ int main(int argc, char **argv) {
         if (!top->o_cpu_held && !start_typed && !ran_early && !cpu_may_run && clocks > 100) { ran_early = true; printf("\nthe CPU runs at %.3f s, before START has been typed\n", clocks / 8e7); }
 #endif
         top->eval();
-        for (int g = 0; g < 3; g++) steps[g] += top->o_step >> g & 1;
+        for (int g = 0; g < 2; g++) steps[g] += top->o_step >> g & 1;
         CLK(0); top->eval();
         clocks++;
         std::string &kernel_console = console[3];
@@ -276,16 +281,16 @@ int main(int argc, char **argv) {
         if (!until.empty() && (clocks & 0xFFFF) == 0 && said == typing.size() &&
             on[until_console].has(until)) shown = true;
     }
-    printf("\n%.3f s of machine time; steps: MIOP %ld, BIOP %ld, XIOP %ld; P %04x %04x %04x; expander disk sectors read %ld, written %ld; drive sectors read %ld, written %ld\n",
-           clocks / 8e7, steps[0], steps[1], steps[2], (unsigned)(top->o_p & 0xFFFF), (unsigned)(top->o_p >> 16 & 0xFFFF),
-           (unsigned)(top->o_p >> 32 & 0xFFFF), disk.reads, disk.writes, drives.reads, drives.writes);
+    printf("\n%.3f s of machine time; steps: MIOP %ld, BIOP %ld; P %04x %04x; expander disk sectors read %ld, written %ld; drive sectors read %ld, written %ld\n",
+           clocks / 8e7, steps[0], steps[1], (unsigned)(top->o_p & 0xFFFF), (unsigned)(top->o_p >> 16 & 0xFFFF),
+           disk.reads, disk.writes, drives.reads, drives.writes);
 #ifdef XMP_MACHINE
     printf("the CPU ran for %.3f s and is %s\n", cpu_clocks / 8e7, top->o_cpu_held ? "held by Master Clear" : "running");
 #endif
-    for (int g = 1; g < 3; g++) {
+    {
         std::string first;
-        for (char c : console[3 + g]) { if (c >= 0x20 && c < 0x7F) first.push_back(c); else if (!first.empty() && first.back() != '|') first.push_back('|'); }
-        printf("console of the %s: %.160s\n", g == 1 ? "BIOP" : "XIOP", first.c_str());
+        for (char c : console[4]) { if (c >= 0x20 && c < 0x7F) first.push_back(c); else if (!first.empty() && first.back() != '|') first.push_back('|'); }
+        printf("console of the BIOP: %.160s\n", first.c_str());
     }
     for (int c : screens) printf("---- console %d\n%s----\n", c, screen(console[c]).c_str());
     if (!printed_text.empty()) {

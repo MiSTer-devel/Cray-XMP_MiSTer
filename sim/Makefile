@@ -2,7 +2,7 @@
 ROOT  := $(abspath ..)
 BUILD := $(ROOT)/sim/build
 
-.PHONY: core ampex spool cpu fp iop ios xmp bridge disks times tape clean
+.PHONY: core ampex spool cpu fp iop ios xmp bridge disks times tape ddr3 clean
 
 # Core-level simulation of the CRAY X-MP core
 core: $(BUILD)/core/Vemu
@@ -64,6 +64,13 @@ $(BUILD)/tape/Vios_tape_tb: $(ROOT)/sim/tape.vc $(ROOT)/sim/harness/tape_main.cp
 bridge: $(BUILD)/bridge/Vxmp_bridge_tb
 $(BUILD)/bridge/Vxmp_bridge_tb: $(ROOT)/sim/bridge.vc $(ROOT)/sim/harness/bridge_main.cpp $(ROOT)/sim/tb/xmp_bridge_tb.v $(ROOT)/rtl/xmp_bridge.v
 	mkdir -p $(BUILD)/bridge && cd $(ROOT) && verilator -f sim/bridge.vc --Mdir $(BUILD)/bridge -o Vxmp_bridge_tb
+
+# The port to DDR3 against what it promises, with lines of code kept and without
+ddr3: $(BUILD)/ddr3/Vddr3_ports_tb $(BUILD)/ddr3_0/Vddr3_ports_tb
+$(BUILD)/ddr3/Vddr3_ports_tb: $(ROOT)/sim/ddr3.vc $(ROOT)/sim/harness/ddr3_main.cpp $(ROOT)/sim/harness/ddram_model.h $(ROOT)/sim/tb/ddr3_ports_tb.sv $(ROOT)/rtl/mister/ddr3_ports.sv
+	mkdir -p $(BUILD)/ddr3 && cd $(ROOT) && verilator -f sim/ddr3.vc --Mdir $(BUILD)/ddr3 -o Vddr3_ports_tb
+$(BUILD)/ddr3_0/Vddr3_ports_tb: $(ROOT)/sim/ddr3.vc $(ROOT)/sim/harness/ddr3_main.cpp $(ROOT)/sim/harness/ddram_model.h $(ROOT)/sim/tb/ddr3_ports_tb.sv $(ROOT)/rtl/mister/ddr3_ports.sv
+	mkdir -p $(BUILD)/ddr3_0 && cd $(ROOT) && verilator -f sim/ddr3.vc -GLINES=0 --Mdir $(BUILD)/ddr3_0 -o Vddr3_ports_tb
 
 clean:
 	rm -rf $(BUILD)

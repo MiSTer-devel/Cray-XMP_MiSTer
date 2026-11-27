@@ -201,7 +201,7 @@ impl Machine {
         match d.op {
             // ---- 000 to 004 (pages 4-7 to 4-13)
             Op::Err => self.exit_instruction(flag::ERROR_EXIT),
-            // These work channels 10 to 17 (see `channel`); a pass outside
+            // These work channels 10 to 13 (see `channel`); a pass outside
             // monitor mode, with j = 0, and for any other channel number.
             Op::SetCa | Op::SetCl | Op::ClearCi | Op::ChanMc => {
                 if monitor && d.j != 0 {

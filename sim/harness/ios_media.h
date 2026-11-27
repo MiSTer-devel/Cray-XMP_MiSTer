@@ -18,6 +18,25 @@ static std::vector<uint8_t> read_file(const std::string &path) {
     return out;
 }
 
+// The boot tape of the COS 1.17 software (.tap) for the two I/O Processors the
+// hardware has (rtl/ios/ios_core.v): the byte of the tape's first file, the
+// parcel that is there and the parcel that is written, as tools/py/mkboot.py
+// has them, which does the same for the core's boot file.  Another tape is
+// left as it is.
+static inline void two_iops(std::vector<uint8_t> &tape) {
+    static const unsigned change[6][3] = {{0x24, 0x009B, 0}, {0x4A, 0x801B, 0}, {0x4C, 0x801B, 0},
+                                          {0xA6, 0x801B, 0}, {0xA8, 0x801B, 0}, {0x3022, 0x700A, 0x700F}};
+    // a record of 4,096 bytes has its length, four bytes, before and after it
+    auto at = [](unsigned byte) { return (size_t)byte + 4 + 8 * (byte / 4096); };
+    for (auto &c : change) {
+        size_t a = at(c[0]);
+        if (a + 1 >= tape.size()) return;
+        unsigned there = tape[a] << 8 | tape[a + 1];
+        if (there != c[1] && there != c[2]) return;
+    }
+    for (auto &c : change) { size_t a = at(c[0]); tape[a] = c[2] >> 8; tape[a + 1] = c[2]; }
+}
+
 // The disk of the Peripheral Expander as the MiSTer framework serves it: a
 // request for a sector of 512 bytes is acknowledged, the bytes go one at a
 // time into (or come out of) the core's buffer, and the acknowledge drops.

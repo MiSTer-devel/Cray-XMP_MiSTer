@@ -13,6 +13,7 @@ A        =       O'100000
 B        =       A+N
 C        =       B+N
          TBEGIN
+         EBM                             ; bidirectional memory, as COS's jobs have it
 * 0: the scalar loop with nothing in it
          S5      RT
          A7      REP

@@ -1,12 +1,12 @@
 // What the core-level test benches watch and drive at the pins of the core:
-// the HPS serial port and the video.
+// the HPS serial port, which is the station's line, and the video.
 #pragma once
 #include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
 
-static const int UART_DIV = 510;        // 58.8 MHz / 115200
+static const int UART_DIV = 6125;       // 58.8 MHz / 9600
 
 struct UartMonitor {                     // decodes the core's TXD
     int state = 0, cnt = 0, bits = 0, sh = 0;

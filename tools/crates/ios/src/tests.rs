@@ -973,8 +973,9 @@ fn interrupt_sequence() {
     iop.step(&mut devices);
     assert!(iop.interrupt_enable());
     iop.set_c(true);
+    // in the clock period the next instruction would have issued in
     let clock_periods = iop.step(&mut devices);
-    assert_eq!(clock_periods, 9);
+    assert_eq!(clock_periods, 1);
     assert_eq!(
         (iop.p(), iop.e(), iop.interrupt_enable()),
         (0x22F7, 5, false)
@@ -1447,14 +1448,14 @@ fn real_time_clock_period() {
 /// [HW 5-12].  The counter cannot be set.
 #[test]
 fn real_time_clock_read() {
-    let mut iop = iop(&[]);
+    let mut iop = iop(&[ins(0o150, 4)]);
     iop.advance(12_345);
     iop.set_c(true);
-    exec(&mut iop, &[ins(0o150, 4)]);
+    run(&mut iop, 1);
     assert_eq!((iop.a(), iop.c()), (12_345 / 2, false));
-    let mut iop = super::tests::iop(&[]);
+    let mut iop = super::tests::iop(&[ins(0o150, 4)]);
     iop.advance(RTC_PERIOD - 1);
-    exec(&mut iop, &[ins(0o150, 4)]);
+    run(&mut iop, 1);
     assert_eq!(iop.a(), 0o116077);
     // the functions that write do not reach the counter
     let before = iop.rtc();
@@ -1480,7 +1481,8 @@ fn real_time_clock_interrupt() {
         ins(0o001, 0),
     ];
     iop.memory_mut()[HANDLER as usize..][..5].copy_from_slice(&handler);
-    let mut time = 0u64;
+    // (setting the exit stack took some clock periods already)
+    let mut time = iop.rtc() as u64;
     let mut entries = Vec::new();
     while time < 10 * RTC_PERIOD as u64 + 1000 {
         let interrupts = iop.counters().interrupts;
@@ -1626,72 +1628,144 @@ fn a_store_ahead_of_p_is_executed() {
     assert_eq!(iop.a(), 99);
 }
 
-/// The clock periods `step` returns (spec parts 4.3 and 8.1).
+/// The clock periods the first `steps` instructions of `program` issue
+/// in, counted from the first one, with the instruction stack filled before
+/// it issues.
+fn issues(program: &[u16], steps: usize, set: impl FnOnce(&mut Iop)) -> Vec<u64> {
+    let mut iop = iop(program);
+    set(&mut iop);
+    iop.advance(40);
+    let mut time = 0;
+    let mut at = Vec::new();
+    for _ in 0..steps {
+        time += iop.step(&mut NoChannels) as u64;
+        at.push(time - 1);
+    }
+    at
+}
+
+/// When instructions issue (spec part 8.2): one issues while those before it
+/// are under way if it needs nothing they hold.
 #[test]
-fn clock_periods() {
-    let cases = [
-        (vec![ins(0, 0)], 1),
-        (vec![ins(0o002, 0)], 1),
-        (vec![ins(0o003, 0)], 2),
-        (vec![ins(0o006, 17)], 3),
-        (vec![ins(0o010, 1)], 1),
-        (vec![ins(0o013, 1)], 3),
-        (vec![ins(0o014, 0), 0], 2),
-        (vec![ins(0o017, 0), 0], 4),
-        (vec![ins(0o020, 1)], 2),
-        (vec![ins(0o023, 1)], 4),
-        (vec![ins(0o024, 1)], 2),
-        (vec![ins(0o027, 1)], 5),
-        (vec![ins(0o030, 1)], 7),
-        (vec![ins(0o033, 1)], 9),
-        (vec![ins(0o034, 1)], 6),
-        (vec![ins(0o037, 1)], 13),
-        (vec![ins(0o040, 0)], 5),
-        (vec![ins(0o047, 0)], 3),
-        (vec![ins(0o050, 0)], 1),
-        (vec![ins(0o054, 0)], 3),
-        (vec![ins(0o057, 0)], 4),
-        (vec![ins(0o060, 0)], 2),
-        (vec![ins(0o067, 0)], 5),
-        // a channel function that sends, and one that reads
-        (vec![ins(0o154, 2)], 1),
-        (vec![ins(0o150, 2)], 5),
-        (vec![ins(0o173, 0)], 5),
-    ];
-    for (parcels, clock_periods) in cases {
-        let mut iop = iop(&[]);
-        iop.set_operand(1, 0x2000);
-        assert_eq!(
-            exec(&mut iop, &parcels),
-            clock_periods,
-            "{:06o}",
-            parcels[0]
-        );
-    }
-    // an EXIT
-    let mut exit = iop(&[ins(0o001, 0)]);
-    assert_eq!(exit.step(&mut NoChannels), 7);
-    // branches: 5 inside the instruction stack (9 parcels forward, 11
-    // back), 9 when it is refilled; not taken, 1, or 2 with a k to skip
-    let branches = [
-        (ins(0o070, 9), 5),
-        (ins(0o070, 10), 9),
-        (ins(0o071, 11), 5),
-        (ins(0o071, 12), 9),
-        (ins(0o072, 9), 5),
-        (ins(0o073, 12), 9),
-        (ins(0o074, 1), 9),
-        (ins(0o077, 1), 9),
-        (ins(0o102, 3), 5),
-        (ins(0o103, 3), 1),
-        (ins(0o126, 1), 9),
-        (ins(0o127, 1), 2),
-    ];
-    for (parcel, clock_periods) in branches {
-        let mut iop = iop(&[parcel, 0]);
-        iop.set_a(0);
-        assert_eq!(iop.step(&mut NoChannels), clock_periods, "{parcel:06o}");
-    }
+fn issue_times() {
+    let pass = ins(0, 0);
+    let plain = |_: &mut Iop| {};
+    // the accumulator: free in 2, 1 or 0 clock periods for the instruction
+    // that wants it.  A = dd, A = A + dd, dd = A, A = dd
+    let program = [ins(0o020, 1), ins(0o022, 2), ins(0o024, 3), ins(0o020, 4)];
+    assert_eq!(issues(&program, 4, plain), [0, 1, 4, 5]);
+    // "shift instructions require 2 CPs" [HW 4-3]; three circular shifts of
+    // 17 places are the 5 clock periods the exit stack wants [HW 3-10]
+    let program = [ins(0o006, 17), ins(0o006, 17), ins(0o006, 17), pass];
+    assert_eq!(issues(&program, 4, plain), [0, 2, 4, 5]);
+    // a run of dd = dd + 1 on different registers: each waits for DP
+    let program = [ins(0o026, 1), ins(0o026, 2), ins(0o026, 3)];
+    assert_eq!(issues(&program, 3, plain), [0, 4, 8]);
+    // a read of the register that is on its way through DP waits a clock
+    // period, and the accumulator comes that much later
+    let same = [ins(0o026, 5), ins(0o022, 5), ins(0o012, 1)];
+    let other = [ins(0o026, 5), ins(0o022, 6), ins(0o012, 1)];
+    assert_eq!(issues(&same, 3, plain), [0, 2, 6]);
+    assert_eq!(issues(&other, 3, plain), [0, 2, 5]);
+    // B is reserved to clock period 4 by B = A + B, to 3 by B = A
+    let program = [ins(0o055, 0), ins(0o050, 0)];
+    assert_eq!(issues(&program, 2, plain), [0, 4]);
+    let program = [ins(0o054, 0), ins(0o050, 0)];
+    assert_eq!(issues(&program, 2, plain), [0, 3]);
+    // Local Memory: the word is in the accumulator in clock period 7; what
+    // does not use the accumulator goes on meanwhile
+    let program = [ins(0o030, 1), pass, pass, ins(0o012, 1)];
+    assert_eq!(issues(&program, 4, plain), [0, 1, 2, 6]);
+    // a store, then a read: the address register is taken until the store
+    // is accepted
+    let program = [ins(0o034, 1), ins(0o030, 2)];
+    assert_eq!(issues(&program, 2, plain), [0, 3]);
+    let program = [ins(0o035, 1), pass, ins(0o030, 2)];
+    assert_eq!(issues(&program, 3, plain), [0, 1, 10]);
+    // "no other instruction can issue until CP 5" behind a flag test
+    let program = [ins(0o040, 0), pass];
+    assert_eq!(issues(&program, 2, plain), [0, 5]);
+    // a function that reads has the accumulator in clock period 6: read
+    // the clock, store it, read the clock
+    let program = [ins(0o150, 4), ins(0o024, 1), ins(0o150, 4)];
+    assert_eq!(issues(&program, 3, plain), [0, 5, 6]);
+    // two parcels, one clock period each; a function that sends
+    let program = [ins(0o014, 0), 7, ins(0o154, 2), pass];
+    assert_eq!(issues(&program, 3, plain), [0, 2, 3]);
+}
+
+/// Branches, EXIT and the instruction stack (spec part 8.3).
+#[test]
+fn branch_times() {
+    let pass = ins(0, 0);
+    let not_zero = |iop: &mut Iop| iop.set_a(1000);
+    // a loop: A = A - 1, PASS, P = P - 2 if A # 0.  The branch does not wait
+    // for the accumulator, what it leads to comes 5 clock periods behind it.
+    let program = [ins(0o013, 1), pass, ins(0o107, 2)];
+    assert_eq!(issues(&program, 5, not_zero), [0, 1, 2, 7, 8]);
+    // dd = dd - 1 and the branch: the branch gives way to the adder, which
+    // the instruction before has in the clock period the branch wants it in
+    let program = [ins(0o027, 5), ins(0o107, 1)];
+    let set = |iop: &mut Iop| iop.set_operand(5, 1000);
+    assert_eq!(issues(&program, 3, set), [0, 2, 7]);
+    // a flag test and a branch on it: the criterion is there a clock period
+    // behind the flag
+    let program = [ins(0o040, 0), ins(0o105, 1)];
+    assert_eq!(issues(&program, 3, |_| {}), [0, 5, 10]);
+    // not taken: the next clock period, or two with a k to pass; later if
+    // the accumulator has still to come
+    let zero = |iop: &mut Iop| iop.set_a(0);
+    let program = [ins(0o103, 3), ins(0o127, 1), 0, pass];
+    assert_eq!(issues(&program, 3, zero), [0, 1, 3]);
+    let program = [ins(0o013, 0), ins(0o103, 3), pass];
+    assert_eq!(issues(&program, 3, zero), [0, 1, 5]);
+    // in the stack as far forward as it has been loaded: 12 parcels from
+    // the first, when nothing has issued yet
+    let far = |d: u16| {
+        let mut program = vec![pass; 40];
+        program[0] = ins(0o070, d);
+        issues(&program, 2, |_| {})[1]
+    };
+    assert_eq!((far(9), far(11), far(12)), (5, 5, 9));
+    // and as far back as the stack reaches: to where it was filled from
+    let back = |from: usize, d: u16| {
+        let mut program = vec![pass; 40];
+        program[from] = ins(0o071, d);
+        let at = issues(&program, from + 2, |_| {});
+        at[from + 1] - at[from]
+    };
+    assert_eq!((back(5, 5), back(5, 6)), (5, 9));
+    assert_eq!((back(30, 19), back(30, 30)), (5, 9));
+    // right behind a fill of the stack a branch of 9 parcels forward is in
+    // it all the same: what the stack goes on to read counts
+    let mut program = vec![pass; 40];
+    program[0] = ins(0o070, 9);
+    let mut first = iop(&program);
+    run(&mut first, 2);
+    let counts = first.counters();
+    assert_eq!((counts.in_stack, counts.out_of_stack), (1, 0));
+    // by an operand register: always out of the stack
+    let set = |iop: &mut Iop| iop.set_operand(1, START + 2);
+    let program = [ins(0o074, 1), pass, pass];
+    assert_eq!(issues(&program, 2, set), [0, 9]);
+    // an EXIT has P two clock periods earlier
+    let mut exit = iop(&[ins(0o001, 0), pass]);
+    set_exit_stack(&mut exit, 0, START + 1);
+    exit.advance(40);
+    assert_eq!(
+        (exit.step(&mut NoChannels), exit.step(&mut NoChannels)),
+        (1, 7)
+    );
+    // a store into a parcel the stack holds fills the stack again
+    let set = |iop: &mut Iop| {
+        iop.set_operand(1, START + 2);
+        iop.set_a(ins(0o010, 5));
+    };
+    let mut program = vec![pass; 40];
+    program[0] = ins(0o034, 1);
+    assert_eq!(issues(&program, 2, set), [0, 7]);
+    let set = |iop: &mut Iop| iop.set_operand(1, START + 100);
+    assert_eq!(issues(&program, 2, set), [0, 1]);
 }
 
 // ---- the disassembler

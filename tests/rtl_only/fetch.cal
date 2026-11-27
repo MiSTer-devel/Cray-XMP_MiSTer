@@ -1,0 +1,31 @@
+* fetch: a jump to code that is in no instruction buffer.
+* NOSTEP
+* The X-MP takes 19 clock periods for it (CSM-0111000 section 5).  The core
+* reads half a buffer, 16 words one behind the other, before the first
+* instruction there can issue, so it takes more however fast memory is: 23
+* with a memory that answers in the next clock.  The test fails if the
+* first instruction issues sooner than the X-MP's 19, or later than 400.
+* The jump is made when the block it is in has been read whole, which the
+* loop before it waits for.
+         INCLUDE "rt_direct.cal"
+         TBEGIN
+         A1      D'60
+WAIT     A1      A1-1
+         A0      A1
+         JAN     WAIT
+         S6      RT
+         J       FAR
+         ORG     4000
+FAR      S7      RT
+         S7      S7-S6                   ; clock periods, and one for the first reading
+         S1      D'20
+         S0      S7-S1
+         JSP     OK1
+         TFAIL   2                       ; sooner than the X-MP
+OK1      S1      D'400
+         S0      S1-S7
+         JSP     OK2
+         TFAIL   3                       ; much too late
+OK2      TPASS
+         TEND
+         END

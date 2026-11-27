@@ -28,13 +28,19 @@ struct MemProfile {
     int gap_pct = 0;                    // chance of an idle clock between the words of a read
     int stall_x1000 = 0;                // chance (per 100000) of a long stall on a read
     int stall_min = 30, stall_max = 100;
+    int wr_every = 0;                   // after this many writes one behind the other, a clock in which nothing is taken
+    int wr_hold = 0;                    // clocks from a write to where the latency of a read behind it begins
     static MemProfile parse(const std::string &s) {
         MemProfile p; p.name = s;
         if (s == "0" || s == "fast")      { p.lat_min = p.lat_max = 1; }
-        // as the DE10-Nano's DDR3 behaves through rtl/mister/ddr3_ports.sv: a word about 16
-        // clocks after its read was taken (tools/py/membench.py against the times measured
-        // under COS), now and then a clock in which the bridge is busy
-        else if (s == "mister")           { p.lat_min = 15; p.lat_max = 17; p.busy_pct = 3; p.stall_x1000 = 100; }
+        // as the DE10-Nano's DDR3 behaves through rtl/mister/ddr3_ports.sv, set by the times
+        // of the benchmark's kernels on one (tools/py/bench.py): a word about 16 clocks after
+        // its read was taken, now and then a clock in which the bridge is busy; of writes one
+        // behind the other the bridge takes five in six clocks, and a read behind a write
+        // begins 19 clocks after the write.  With these the kernels' times are within 6% of
+        // the hardware's, 2% in the mean; the two rules about writes are a fit to the times,
+        // not a model of what the bridge does
+        else if (s == "mister")           { p.lat_min = 15; p.lat_max = 17; p.busy_pct = 3; p.stall_x1000 = 100; p.wr_every = 5; p.wr_hold = 19; }
         else if (s == "ddr3")             { p.lat_min = 6; p.lat_max = 12; p.busy_pct = 10; p.gap_pct = 5; p.stall_x1000 = 300; }
         else if (s == "slow")             { p.lat_min = 10; p.lat_max = 40; p.busy_pct = 40; p.gap_pct = 30; p.stall_x1000 = 2000; }
         else if (s.rfind("fixed:", 0) == 0) { p.lat_min = p.lat_max = std::max(1, atoi(s.c_str() + 6)); }
@@ -93,12 +99,19 @@ public:
     // gaps, and never before the last word of the read before.
     void step(bool req, bool we, unsigned len, uint32_t addr, uint64_t wdata) {
         cycle++;
+        bool hold = false;
         if (req && take) {
-            if (we) write(addr & 0x3FFFFF, wdata);
-            else {
+            if (we) {
+                write(addr & 0x3FFFFF, wdata);
+                wr_run = (last_write && cycle <= last_write + 2) ? wr_run + 1 : 1;
+                last_write = cycle;
+                if (prof.wr_every && wr_run >= prof.wr_every) { wr_run = 0; hold = true; }
+            } else {
                 if (len < 1 || len > 16) { fprintf(stderr, "mem: a read of %u words (cycle %llu)\n", len, (unsigned long long)cycle); bad = true; }
                 if (((addr + len - 1) >> 4) != (addr >> 4)) { fprintf(stderr, "mem: a read across a line at %o (cycle %llu)\n", addr, (unsigned long long)cycle); bad = true; }
-                uint64_t when = cycle + range(prof.lat_min, prof.lat_max);
+                uint64_t from = cycle;
+                if (prof.wr_hold && last_write && from < last_write + prof.wr_hold) from = last_write + prof.wr_hold;
+                uint64_t when = from + range(prof.lat_min, prof.lat_max);
                 if (prof.stall_x1000 && (int)(rng() % 100000) < prof.stall_x1000) when += range(prof.stall_min, prof.stall_max);
                 if (when <= last_word) when = last_word + 1;
                 for (unsigned b = 0; b < len; b++) {
@@ -115,7 +128,7 @@ public:
             pending.pop_front();
             ack = true;
         }
-        take = !(prof.busy_pct && (int)(rng() % 100) < prof.busy_pct);
+        take = !hold && !(prof.busy_pct && (int)(rng() % 100) < prof.busy_pct);
     }
 
     // End state in the same text format as the reference model (cray-xmp-run --state):
@@ -138,6 +151,8 @@ private:
     struct Word { uint64_t when; uint64_t data; };
     std::deque<Word> pending;
     uint64_t last_word = 0;
+    uint64_t last_write = 0;
+    int wr_run = 0;
     std::mt19937 rng;
     int range(int a, int b) { return a + (int)(rng() % (uint32_t)(b - a + 1)); }
 

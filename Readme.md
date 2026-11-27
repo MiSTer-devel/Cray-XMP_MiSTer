@@ -190,11 +190,11 @@ The top line of a console is the status line of its terminal, an Ampex Dialogue 
   `FDUMP STATION/name @MT0:` copies a file of the kernel's disk to the tape and
   `FLOAD @MT0:` copies what is on the tape back.
 - Reset starts the machine again: go on from the date. The four files stay chosen.
-- Aspect ratio (with the custom ratios of `MiSTer.ini`), Scale and Scandoubler Fx work as in
-  other cores. The scandoubler is for the 8x8 font.
+- Aspect ratio (with the custom ratios of `MiSTer.ini`) and Scale work as in other cores.
 - Text color: white, green, amber or cyan
 - Font: 8x8 (15 kHz lines), the one the core starts with, or 8x16 (31 kHz lines), which is
-  sharper: choose it on HDMI or a VGA monitor.
+  sharper: choose it on HDMI or a VGA monitor. With `forced_scandoubler=1` in `MiSTer.ini` the
+  core always shows 8x16, which is its picture for a screen that needs 31 kHz lines.
 - Device times: Fast, or Real: the disk drives, the tape, the printer, the consoles and the
   channel to the CPU take as long as the real ones did
 
@@ -202,6 +202,8 @@ The top line of a console is the status line of its terminal, an Ampex Dialogue 
 
 - `Load a boot file from the menu to start it.`: the four files of [Starting COS](#starting-cos)
   have to be chosen each time the core is started.
+- The same message after `cos117.ios` was chosen: the file is from an earlier release. Unpack
+  the `Cray-XMP_COS-1.17.zip` that is next to the core in [releases](releases).
 - `INVALID COMMAND`: the command was typed in small letters. Press Caps Lock.
 - Typing shows on the screen but the computer does not answer, and the top line says `BLK`: the
   terminal is in block mode. Press **F10**.

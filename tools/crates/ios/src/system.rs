@@ -633,6 +633,9 @@ impl Channels for Side {
         self.settle(self.current);
         self.local[self.current].request
     }
+    fn pass(&mut self, clock_periods: u32) {
+        self.now += clock_periods as u64;
+    }
 }
 
 /// What a system is made of.
@@ -659,6 +662,29 @@ pub struct Config {
     pub timing: Timing,
 }
 
+/// What is changed on the boot tape of the COS 1.17 software for an I/O
+/// Subsystem of two I/O Processors: the byte of the tape's first file, the
+/// parcel that is there and the parcel that is written.  The first five are
+/// in the configuration overlay AMAP, the first of the file (devices spec
+/// part 1.3); CDEM is the demon that passes the mainframe's packets on to the
+/// other I/O Processors.  tools/py/mkboot.py has the same table, for the
+/// core's boot file, and sim/harness/ios_media.h, for the simulations.
+pub const TWO_IOPS: [(usize, u16, u16); 6] = [
+    // AMAP parcel 0x12, the section of IOP 3: none, so it is not dead started
+    (0x00024, 0x009B, 0x0000),
+    // AMAP, the MIOP's channels 12 and 13: no link to IOP 3
+    (0x0004A, 0x801B, 0x0000),
+    (0x0004C, 0x801B, 0x0000),
+    // AMAP, the BIOP's channels 12 and 13
+    (0x000A6, 0x801B, 0x0000),
+    (0x000A8, 0x801B, 0x0000),
+    // CDEM, parcel 0x1F of its code: a tape packet (type D) is released, at
+    // P + 15, where the demon releases it once it has been sent, and not
+    // passed to IOP 3, at P + 10.  The XIOP never answers the one COS sends
+    // at its start (SM-0046 4.3.1).
+    (0x03022, 0x700A, 0x700F),
+];
+
 impl Config {
     /// The system of the surviving COS 1.17 software: MIOP, BIOP and XIOP,
     /// four million words of Buffer Memory, no clock, no disks yet.
@@ -679,6 +705,29 @@ impl Config {
     /// Change a parcel of the kernel before it is loaded.
     pub fn poke_kernel(&mut self, parcel: usize, value: u16) {
         self.kernel[2 * parcel..2 * parcel + 2].copy_from_slice(&value.to_be_bytes());
+    }
+
+    /// Leave out the XIOP.  An I/O Subsystem has two to four I/O Processors
+    /// (HR-3005 table 4-2), and the core has the two it cannot be without.
+    /// The COS 1.17 software was configured for three and waits for the
+    /// third for ever: the parcels of `TWO_IOPS` on its tape say there are
+    /// two.  False if the tape is not that software's, which is then left as
+    /// it is; true also if it was changed before.
+    pub fn two_iops(&mut self) -> bool {
+        self.iops[3] = false;
+        let parcel = |tape: &Tape, byte: usize| {
+            Some((tape.peek(0, byte)? as u16) << 8 | tape.peek(0, byte + 1)? as u16)
+        };
+        let fits = TWO_IOPS.iter().all(|&(byte, old, new)| {
+            parcel(&self.tape, byte).is_some_and(|there| there == old || there == new)
+        });
+        if fits {
+            for &(byte, _, new) in &TWO_IOPS {
+                self.tape.poke(0, byte, (new >> 8) as u8);
+                self.tape.poke(0, byte + 1, new as u8);
+            }
+        }
+        fits
     }
 
     /// Give the system a clock.  The kernel and the overlay XCLOCK of this

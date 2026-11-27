@@ -33,8 +33,8 @@ started from the finished files and four jobs are run: the three examples,
 which assemble, compile and interpret a small program each, and one that
 assembles a program with the macros of SYSTXT.  What they print is compared.
 
-What differs from the software as it was recovered, all of it in the two
-lists of parameters on the expander disk, INSTALL and DEADSTART:
+What differs from the software as it was recovered.  In the two lists of
+parameters on the expander disk, INSTALL and DEADSTART:
 
 - One drive, the master device on channel 20, instead of nine: 607 MB on the
   card instead of 5.5 GB.  The drive is not reserved for requests by name
@@ -43,6 +43,14 @@ lists of parameters on the expander disk, INSTALL and DEADSTART:
   not always read back; the reference simulator shows the same.
 - No device in Buffer Memory (BMR-0-20).  Buffer Memory is empty after every
   start, and with the device COS asks each time whether to label it anew.
+- No tape devices (MT0 to MT3).  They are the XIOP's, the third I/O Processor,
+  which the core does not have.  A tape device that is named with nothing
+  behind its name is taken out of the configuration (SM-0043 5.2.6.2), and
+  with none in it COS sends the I/O Subsystem no tape packet.
+
+And on the boot tape, in the boot file: six parcels that tell the I/O
+Subsystem's software that it has two I/O Processors and not three
+(tools/py/mkboot.py, TWO_IOPS).  The system model runs the same two.
 
 Jobs say ACCOUNT,AC=CRAY,US=SYSTEM.  An interactive session is the user SYSTEM
 whatever it says, and a dataset that a job saves without a user number is
@@ -61,7 +69,7 @@ import sys
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from mkboot import boot_file  # noqa: E402
+from mkboot import boot_file, two_iops  # noqa: E402
 import expdisk  # noqa: E402
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
@@ -91,13 +99,16 @@ SPARE = ('STATION/COS_117_1', 'STATION/COS_117_2', 'STATION/JDIAGGO', 'STATION/J
          'BIN/LOADCAT', 'BIN/PLD10', 'BIN/PRVDEF', 'BIN/RECALL', 'BIN/RECIO', 'BIN/RELOAD')
 
 OTHER_DEVICES = ('29-1-21A', '29-1-22A', 'STRIPE-1', '29-1-24A', '29-1-25A', '29-1-26A',
-                 '29-1-30A', '29-1-31A', '29-1-32A', 'BMR-0-20', 'MT0', 'MT1', 'MT2', 'MT3')
+                 '29-1-30A', '29-1-31A', '29-1-32A', 'BMR-0-20')
+TAPE_DEVICES = ('MT0', 'MT1', 'MT2', 'MT3')
 
 
 def parameters(start, master):
     """A list of parameters for START: the master device and nothing else."""
     lines = ['*' + start, '*SKIPEFT', '*CONFIG,DVN=MD-1-20A,AVAIL,' + master]
     lines += ['*CONFIG,DVN=%s,NAVAIL' % device for device in OTHER_DEVICES]
+    # a tape device with nothing behind its name is deleted
+    lines += ['*CONFIG,DVN=%s' % device for device in TAPE_DEVICES]
     lines += ['*END']
     text = ('\r'.join(lines) + '\r').encode('ascii')
     # the kernel hands COS whole words
@@ -330,7 +341,9 @@ def main(argv):
         os.makedirs(directory, exist_ok=True)
 
     kernel = open(os.path.join(SYSTEM, 'iop_kern.bin'), 'rb').read()
-    tape = open(os.path.join(SYSTEM, 'boot_tape.tap'), 'rb').read()
+    tape = two_iops(open(os.path.join(SYSTEM, 'boot_tape.tap'), 'rb').read())
+    if tape is None:
+        sys.exit('mkcos: %s is not the boot tape of COS 1.17' % os.path.join(SYSTEM, 'boot_tape.tap'))
     stock = gzip.open(os.path.join(SYSTEM, 'exp_disk.img.gz'), 'rb').read()
     try:
         open(os.path.join(games, 'cos117.ios'), 'wb').write(boot_file(kernel, tape))

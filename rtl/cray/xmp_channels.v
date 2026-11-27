@@ -1,6 +1,11 @@
-// The 6 Mbyte channels of the X-MP: channels 10 to 17 octal, the even
+// The 6 Mbyte channels of the X-MP: channels 10 to 13 octal, the even
 // ones input and the odd ones output (CSM-0111000 pages 2-15 to 2-19, 5-9,
 // 5-37 and appendix B).  The reference model is tools/crates/model/src/channel.rs.
+//
+// A mainframe has up to four pairs, 10 to 17, two to each of its I/O ports
+// (CSM-0111000 pages 1-3 and 2-13).  This one has the two pairs of the upper
+// port, which is what the smallest X-MP has, the X-MP/14se (HR-3005 tables
+// 4-1 and 4-2); COS 1.17 works one pair.  14 to 17 name no channel here.
 //
 // A channel moves 16-bit parcels between a device and central memory, four to
 // a word, bits 63 to 48 first.  The program enters the limit address CL (0011)
@@ -47,7 +52,7 @@ module xmp_channels (
 	input wire        i_set_cl,  // 0011: enter CL
 	input wire        i_clear,   // 0012: clear the flags, stop the channel
 	input wire        i_k1,      // 0012j1
-	input wire [ 2:0] i_num,     // channel number less 10 octal, for the orders and for 033
+	input wire [ 1:0] i_num,     // channel number less 10 octal, for the orders and for 033
 	input wire [21:0] i_addr,
 
 	// for 033
@@ -65,29 +70,29 @@ module xmp_channels (
 	input  wire [63:0] i_mem_rdata,
 
 	// devices: element n is the channel pair 10 + 2n and 11 + 2n
-	input  wire [ 3:0] i_in_ready,
-	input  wire [63:0] i_in_data,
-	output reg  [ 3:0] o_in_resume,
-	input  wire [ 3:0] i_in_disconnect,
-	output reg  [ 3:0] o_out_ready,
-	output wire [63:0] o_out_data,
-	input  wire [ 3:0] i_out_resume,
-	output reg  [ 3:0] o_out_disconnect,
-	output reg  [ 3:0] o_out_mc
+	input  wire [ 1:0] i_in_ready,
+	input  wire [31:0] i_in_data,
+	output reg  [ 1:0] o_in_resume,
+	input  wire [ 1:0] i_in_disconnect,
+	output reg  [ 1:0] o_out_ready,
+	output wire [31:0] o_out_data,
+	input  wire [ 1:0] i_out_resume,
+	output reg  [ 1:0] o_out_disconnect,
+	output reg  [ 1:0] o_out_mc
 );
 
-	// state of the eight channels; index = channel number less 10 octal
-	reg [21:0] ca[0:7];
-	reg [21:0] cl[0:7];
-	reg [7:0] active;
-	reg [7:0] intr;
-	reg [63:0] word[0:7];
-	reg [2:0] count[0:7];  // input: parcels assembled; output: parcels left to send
-	reg [7:0] want;  // a memory reference is asked for or under way
-	reg [7:0] stale;  // the reference under way was overtaken by an order
-	reg [3:0] held;  // input: a Ready came while inactive
-	reg [3:0] tail;  // input: the store asked for is the part word left by a Disconnect
-	reg [3:0] sent;  // output: a parcel is out, waiting for its Resume
+	// state of the four channels; index = channel number less 10 octal
+	reg [21:0] ca[0:3];
+	reg [21:0] cl[0:3];
+	reg [3:0] active;
+	reg [3:0] intr;
+	reg [63:0] word[0:3];
+	reg [2:0] count[0:3];  // input: parcels assembled; output: parcels left to send
+	reg [3:0] want;  // a memory reference is asked for or under way
+	reg [3:0] stale;  // the reference under way was overtaken by an order
+	reg [1:0] held;  // input: a Ready came while inactive
+	reg [1:0] tail;  // input: the store asked for is the part word left by a Disconnect
+	reg [1:0] sent;  // output: a parcel is out, waiting for its Resume
 
 	assign o_ca  = ca[i_num];
 	assign o_err = 1'b0;
@@ -98,12 +103,12 @@ module xmp_channels (
 	integer pi;
 	always @(*) begin
 		o_int_num = 4'd0;
-		for (pi = 7; pi >= 0; pi = pi - 1) if (intr[pi]) o_int_num = {1'b1, pi[2:0]};
+		for (pi = 3; pi >= 0; pi = pi - 1) if (intr[pi]) o_int_num = {2'b10, pi[1:0]};
 	end
 
 	genvar g;
 	generate
-		for (g = 0; g < 4; g = g + 1) begin : g_data
+		for (g = 0; g < 2; g = g + 1) begin : g_data
 			assign o_out_data[16*g+:16] = word[2*g+1][63:48];
 		end
 	endgenerate
@@ -111,10 +116,10 @@ module xmp_channels (
 	// an input channel takes a parcel: one that comes with Ready, or one that was
 	// held.  (Written out channel by channel: Verilator 5.032 lets a loop over the
 	// parcel counts go stale.)
-	wire [3:0] take;
-	wire [3:0] fourth;
+	wire [1:0] take;
+	wire [1:0] fourth;
 	generate
-		for (g = 0; g < 4; g = g + 1) begin : g_take
+		for (g = 0; g < 2; g = g + 1) begin : g_take
 			assign take[g]   = active[2*g] && !want[2*g] && (i_in_ready[g] || held[g]);
 			assign fourth[g] = take[g] && (count[2*g] == 3'd3);
 		end
@@ -122,45 +127,45 @@ module xmp_channels (
 
 	// one memory reference at a time, the lowest numbered channel first
 	reg           busy;
-	reg     [2:0] owner;
-	reg     [2:0] pick;
+	reg     [1:0] owner;
+	reg     [1:0] pick;
 	reg           any;
 	integer       pk;
 	always @(*) begin
-		pick = 3'd0;
+		pick = 2'd0;
 		any  = 1'b0;
-		for (pk = 7; pk >= 0; pk = pk - 1)
+		for (pk = 3; pk >= 0; pk = pk - 1)
 		if (want[pk]) begin
-			pick = pk[2:0];
+			pick = pk[1:0];
 			any  = 1'b1;
 		end
 	end
 
-	wire       set_count = i_set_ca || i_clear;  // the program zeroes the ordered channel's parcel count
-	wire       set_ca_owner = i_set_ca && (i_num == owner);  // and gives the channel whose reference ends an address
-	wire [1:0] pair = i_num[2:1];  // of the order
-	wire       mine = busy && (owner == i_num);  // the ordered channel's reference is under way
-	wire       drop = !mine && ((want[i_num] && !tail[pair]) || fourth[pair]);  // an input word's store that waits
+	wire set_count = i_set_ca || i_clear;  // the program zeroes the ordered channel's parcel count
+	wire set_ca_owner = i_set_ca && (i_num == owner);  // and gives the channel whose reference ends an address
+	wire pair = i_num[1];  // of the order
+	wire mine = busy && (owner == i_num);  // the ordered channel's reference is under way
+	wire drop = !mine && ((want[i_num] && !tail[pair]) || fourth[pair]);  // an input word's store that waits
 
 	integer n;
 	always @(posedge clk) begin
-		o_in_resume      <= 4'b0;
-		o_out_ready      <= 4'b0;
-		o_out_disconnect <= 4'b0;
+		o_in_resume      <= 2'b0;
+		o_out_ready      <= 2'b0;
+		o_out_disconnect <= 2'b0;
 
 		if (rst || i_io_clear) begin
-			active <= 8'b0;
-			intr   <= 8'b0;
-			want   <= 8'b0;
-			stale  <= 8'b0;
-			held   <= 4'b0;
-			tail   <= 4'b0;
-			sent   <= 4'b0;
+			active <= 4'b0;
+			intr   <= 4'b0;
+			want   <= 4'b0;
+			stale  <= 4'b0;
+			held   <= 2'b0;
+			tail   <= 2'b0;
+			sent   <= 2'b0;
 			// the Master Clear lines to the devices are 0012's and stay
-			if (rst) o_out_mc <= 4'b0;
+			if (rst) o_out_mc <= 2'b0;
 			busy      <= 1'b0;
 			o_mem_req <= 1'b0;
-			for (n = 0; n < 8; n = n + 1) begin
+			for (n = 0; n < 4; n = n + 1) begin
 				ca[n]    <= 22'd0;
 				cl[n]    <= 22'd0;
 				count[n] <= 3'd0;
@@ -181,11 +186,11 @@ module xmp_channels (
 				stale[owner] <= 1'b0;
 				if (!owner[0]) begin
 					// input: the word is in memory
-					want[owner]      <= 1'b0;
-					tail[owner[2:1]] <= 1'b0;
-					if (!tail[owner[2:1]]) o_in_resume[owner[2:1]] <= 1'b1;
+					want[owner]    <= 1'b0;
+					tail[owner[1]] <= 1'b0;
+					if (!tail[owner[1]]) o_in_resume[owner[1]] <= 1'b1;
 					if (!stale[owner]) begin
-						if (tail[owner[2:1]]) intr[owner] <= 1'b1;
+						if (tail[owner[1]]) intr[owner] <= 1'b1;
 						else begin
 							if (!set_ca_owner) ca[owner] <= ca[owner] + 22'd1;
 							if ((ca[owner] + 22'd1) == cl[owner]) begin
@@ -203,12 +208,12 @@ module xmp_channels (
 					word[owner] <= i_mem_rdata;
 					if (!set_ca_owner) ca[owner] <= ca[owner] + 22'd1;
 					if (!(set_count && (i_num == owner))) count[owner] <= 3'd4;
-					o_out_ready[owner[2:1]] <= 1'b1;
-					sent[owner[2:1]]        <= 1'b1;
+					o_out_ready[owner[1]] <= 1'b1;
+					sent[owner[1]]        <= 1'b1;
 				end
 			end
 
-			for (n = 0; n < 4; n = n + 1) begin
+			for (n = 0; n < 2; n = n + 1) begin
 				// ---- input channel 2n
 				if (i_in_ready[n] && !active[2*n]) held[n] <= 1'b1;
 				if (take[n]) begin
@@ -230,7 +235,7 @@ module xmp_channels (
 					word[2*n] <= (count[2*n] == 3'd1) ? {word[2*n][15:0], 48'b0} :
 								 (count[2*n] == 3'd2) ? {word[2*n][31:0], 32'b0} : {word[2*n][47:0], 16'b0};
 				else if (take[n]) word[2*n] <= {word[2*n][47:0], i_in_data[16*n+:16]};
-				if (!(set_count && (i_num == {n[1:0], 1'b0}))) begin
+				if (!(set_count && (i_num == {n[0], 1'b0}))) begin
 					if (i_in_disconnect[n] && active[2*n] && (count[2*n] != 3'd0)) count[2*n] <= 3'd0;
 					else if (take[n]) count[2*n] <= fourth[n] ? 3'd0 : count[2*n] + 3'd1;
 				end
@@ -238,7 +243,7 @@ module xmp_channels (
 				// ---- output channel 2n + 1
 				if (i_out_resume[n] && sent[n] && active[2*n+1]) begin
 					sent[n] <= 1'b0;
-					if (!(set_count && (i_num == {n[1:0], 1'b1}))) count[2*n+1] <= count[2*n+1] - 3'd1;
+					if (!(set_count && (i_num == {n[0], 1'b1}))) count[2*n+1] <= count[2*n+1] - 3'd1;
 					word[2*n+1] <= {word[2*n+1][47:0], 16'b0};
 					if (count[2*n+1] != 3'd1) begin
 						o_out_ready[n] <= 1'b1;

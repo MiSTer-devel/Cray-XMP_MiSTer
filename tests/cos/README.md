@@ -16,6 +16,10 @@ DE10-Nano, under "Differences from a real X-MP".
 `tools/py/membench.py` runs the same loops in the CPU simulation
 (`tests/bench/membench.cal`), for a look before a build.
 
+`tools/py/bench.py` has these loops and eighteen more as one job that reads
+its own times off the real-time clock: see "The benchmark" in
+`docs/DEVELOPMENT.md`.
+
 To run one, put it on the expander disk as a job behind these statements
 (`tools/py/expdisk.py puttext`, see `docs/DEVELOPMENT.md`) and submit it at
 the station. The log printed with the job has the CPU time at `$ABD.` and

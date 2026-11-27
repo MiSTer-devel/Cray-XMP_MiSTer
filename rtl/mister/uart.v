@@ -1,4 +1,4 @@
-// Minimal 8N1 UART for the console mirror on the HPS serial port.
+// Minimal 8N1 UART for the station's line on the HPS serial port.
 
 module uart_tx #(
 	parameter CLK_HZ = 29400000,

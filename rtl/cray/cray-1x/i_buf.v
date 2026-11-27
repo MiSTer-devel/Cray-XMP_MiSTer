@@ -16,11 +16,15 @@ module i_buf (
 	rst,
 	i_p_addr,
 	i_jump,
+	i_jump_if,
+	i_jump_issue,
 	i_jump_addr,
 	o_nip_nxt,
 	o_nip_vld,
 	o_mem_ce,
 	o_mem_addr,
+	o_mem_early,
+	o_mem_early_addr,
 	i_mem_data,
 	i_mem_vld,
 	i_hold,
@@ -31,12 +35,16 @@ module i_buf (
 	input wire rst;
 	input wire [23:0] i_p_addr;
 	input wire i_jump;  // a branch is taken this clock: i_p_addr is its address in the next
+	input wire i_jump_if;  // one is taken if the current instruction issues,
+	input wire i_jump_issue;  // and it issues: the two together are i_jump
 	input wire [23:0] i_jump_addr;
 	output reg [15:0] o_nip_nxt;
 	output wire o_nip_vld;
 	//64-bit wide memory interface
 	output wire o_mem_ce;  // a request for the 16 words of half a buffer, held until the last word
 	output wire [21:0] o_mem_addr;
+	output wire o_mem_early;  // the request of the next clock, told a clock ahead
+	output wire [21:0] o_mem_early_addr;
 	input wire [63:0] i_mem_data;
 	input wire i_mem_vld;
 	input wire i_hold;  // do not start a new fill
@@ -95,15 +103,16 @@ module i_buf (
 	//whichever buffer its address is in (CSM-0111000 section 5: 5 CPs with the
 	//branch address in a buffer): the buffers are asked for it at once, and answer
 	//two clocks later.
-	reg [1:0] jump_wait;
-	always @(posedge clk)
-		if (i_jump) begin
-			buf_delay <= i_jump_addr[23:7];
-			cur_buf   <= i_jump_addr[23:7];
-		end else begin
-			buf_delay <= i_p_addr[23:7];
-			cur_buf   <= buf_delay;
-		end
+	reg  [ 1:0] jump_wait;
+	//Whether a branch is taken is known last of all in its clock, with whether
+	//the instruction issues.  What the two registers take if it does issue is
+	//formed first (and kept as written), so that the issue only picks.
+	(* keep *)wire [16:0] buf_delay_if = i_jump_if ? i_jump_addr[23:7] : i_p_addr[23:7];
+	(* keep *)wire [16:0] cur_buf_if = i_jump_if ? i_jump_addr[23:7] : buf_delay;
+	always @(posedge clk) begin
+		buf_delay <= i_jump_issue ? buf_delay_if : i_p_addr[23:7];
+		cur_buf   <= i_jump_issue ? cur_buf_if : buf_delay;
+	end
 
 	always @(posedge clk)
 		if (rst) jump_wait <= 2'd0;
@@ -113,12 +122,20 @@ module i_buf (
 	wire same_block = (cur_buf == i_p_addr[23:7]);
 
 	//Enable memory if we're trying to fill a buffer, and provide the correct address
-	assign o_mem_ce   = (buf_state == RX);
+	//In the clock a fill starts, a clock before the state and the address
+	//register have it, the memory multiplexer is told what will be asked for
+	//(o_mem_early): it takes the request then if it has nothing else to take,
+	//and a fill loses no clock to the register the multiplexer puts requests in.
+	//The same for the second half, in the clock the last word of the first comes.
+	wire next_half = half_complete && !fill_last;
+	assign o_mem_ce         = (buf_state == RX);
+	assign o_mem_early      = fill_start || next_half;
+	assign o_mem_early_addr = next_half ? {tmp_addr, !fill_half, 4'b0} : {i_p_addr[23:7], i_p_addr[6], 4'b0};
 	//A half of the block is a 16-word line and is fetched as one 16-word burst: the
 	//address stays at the start of the line and i_mem_vld pulses once per word.  The
 	//request stays up from one half to the other; the address changes behind the
 	//last word of the first.
-	assign o_mem_addr = {tmp_addr, fill_half, 4'b0};
+	assign o_mem_addr       = {tmp_addr, fill_half, 4'b0};
 
 	//tell the main block if the next instruction parcel is valid or not
 	assign o_nip_vld = (buf0_match || buf1_match || buf2_match || buf3_match) && same_block && (jump_wait == 2'd0);

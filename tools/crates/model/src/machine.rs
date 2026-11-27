@@ -302,10 +302,10 @@ pub struct Machine {
     pub(crate) mcu_request: bool,
     /// Some channel has its interrupt request set.
     pub(crate) io_request: bool,
-    /// The 6 Mbyte channels 10 to 17 octal.
-    pub(crate) channels: [crate::channel::Channel; 8],
+    /// The 6 Mbyte channels 10 to 13 octal.
+    pub(crate) channels: [crate::channel::Channel; 4],
     pub(crate) channel_loopback: bool,
-    pub(crate) loop_waiting: [bool; 4],
+    pub(crate) loop_waiting: [bool; 2],
     /// Programmable clock: 0014j6 has enabled the interrupt request.
     pub(crate) clock_enabled: bool,
     /// Programmable clock: the request may be set (it sets when the
@@ -381,7 +381,7 @@ impl Machine {
             io_request: false,
             channels: Default::default(),
             channel_loopback: false,
-            loop_waiting: [false; 4],
+            loop_waiting: [false; 2],
             clock_enabled: false,
             clock_request_possible: false,
             want_exchange: false,

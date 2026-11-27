@@ -3,10 +3,11 @@
 
     runtests.py quick [-j JOBS]   smoke tests under every start-up, the directed tests,
                                   the self-checking clock and interrupt tests, the
-                                  floating-point reference vectors, 300 random programs
-                                  and 100 of chained vector instructions;
-                                  then the I/O Processor: 400 random programs, and
-                                  the self-check of three of them together, the
+                                  floating-point reference vectors, the benchmark's
+                                  kernels, 300 random programs and 100 of chained
+                                  vector instructions;
+                                  then the I/O Processor: 600 random programs, and
+                                  the self-check of the two together, the
                                   disk drives' sectors and times; then
                                   the X-MP core: its terminal on 400 random screens,
                                   its message when no boot file is loaded, and the
@@ -41,6 +42,7 @@ PY = sys.executable
 DIFF = os.path.join(ROOT, 'tools/py/difftest.py')
 IOP = os.path.join(ROOT, 'tools/py/ioptest.py')
 CORE = os.path.join(ROOT, 'tools/py/coretest.py')
+BENCH = os.path.join(ROOT, 'tools/py/bench.py')
 FPBENCH = os.path.join(ROOT, 'sim/build/fp/Vfp_tb')
 SYS = os.path.join(ROOT, 'tools/target/release/cray-xmp-sys')
 SYSTEM = os.environ.get('CRAY_XMP_SYSTEM', '')
@@ -118,7 +120,8 @@ def main():
                [PY, DIFF, 'file'] + sorted(glob.glob(os.path.join(ROOT, 'tests/directed/*.cal'))) + ['-I', 'tests/rt', '-j', jobs])
     ok &= rtl_only()
     ok &= step('floating-point reference vectors', [FPBENCH, 'tests/fp/xmp_ref.vec'])
-    ok &= step('I/O Processor: 400 random programs', [PY, IOP, 'rand', '1', '200', '-j', jobs])
+    ok &= step('the benchmark\'s kernels: their sums against the reference model\'s', [PY, BENCH, 'sim'])
+    ok &= step('I/O Processor: 600 random programs', [PY, IOP, 'rand', '1', '200', '-j', jobs])
     ok &= step('I/O Processors together: self-check', [PY, IOP, 'selftest'])
     ok &= step('the bridges between the two clocks, 2,000 cases', [PY, IOP, 'bridges'])
     ok &= step('the disk drives: sectors and times', [PY, IOP, 'disks'])
@@ -126,6 +129,7 @@ def main():
     ok &= step('the tape drive: 300 tapes, and a file to tape and back if the software is there', [PY, IOP, 'tape'])
     ok &= step('X-MP core: the terminal on 400 random screens', [PY, CORE, 'screens'])
     ok &= step('X-MP core: the printer\'s file, 400 of them', [PY, CORE, 'spool'])
+    ok &= step('X-MP core: the port to DDR3, 300 cases with lines kept and 300 without', [PY, CORE, 'ddr3'])
     ok &= step('X-MP core: no boot file', [PY, CORE, 'nofile'])
     ok &= step('X-MP core: the self-check, with its printing on the screen and in the file', [PY, CORE, 'printer'])
     if a[0] == 'quick':
@@ -142,14 +146,14 @@ def main():
         ok &= step('12,000 random programs', [PY, DIFF, 'rand', '1', '12000', '-n', '250', '-j', jobs])
         ok &= step('2,000 random programs of chained vector instructions',
                    [PY, DIFF, 'rand', '1', '2000', '-n', '250', '--chain', '-j', jobs])
-        ok &= step('I/O Processor: 4,000 random programs', [PY, IOP, 'rand', '201', '2200', '-j', jobs])
+        ok &= step('I/O Processor: 6,000 random programs', [PY, IOP, 'rand', '201', '2200', '-j', jobs])
         if os.path.exists(D80_ROM):
             ok &= step('the terminal model against the terminal\'s firmware, 600 streams',
                        [PY, os.path.join(ROOT, 'tools/py/d80test.py'), '1', '600', '-j', jobs])
         if os.path.exists(os.path.join(SYSTEM, 'boot_tape.tap')):
             ok &= step('system model: COS 1.17 dead starts and runs a job',
                        [SYS, SYSTEM, '--script', 'tests/sys/cos.script', '--quiet'])
-            ok &= step('I/O Processor: the kernel boots on each of the three', [PY, IOP, 'kernel', SYSTEM])
+            ok &= step('I/O Processor: the kernel boots on each of the two', [PY, IOP, 'kernel', SYSTEM])
             ok &= step('I/O Subsystem: the kernel boots', [PY, IOP, 'boot', SYSTEM])
             ok &= step('CPU and I/O Subsystem: COS is loaded and started', [PY, IOP, 'machine', SYSTEM, '--start'])
             ok &= step('X-MP core: the kernel boots, and again after a reset', [PY, CORE, 'boot', SYSTEM])

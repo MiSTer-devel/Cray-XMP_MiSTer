@@ -1,0 +1,129 @@
+* bdm: the three memory ports.  A vector load takes port B, or port A when
+* B is busy; a vector store port C; 034 port A, 036 port B, 035 and 037 port
+* C.  In the bidirectional memory mode (EBM) a block read and a block write
+* run together; with it off (DBM) a write waits for the reads and the reads
+* for the write.  The words of a transfer are only looked at after a CMR,
+* which waits for every reference, or after the transfers that read them
+* have finished; the areas that are read and written together are apart,
+* as the X-MP asks of a program (HR-0097B page 31).  Every result is stored,
+* for the comparison with the reference model.
+         INCLUDE "rt_direct.cal"
+A        =       O'10000                 ; 64 words each
+B        =       O'10100
+C        =       O'10200
+D        =       O'10300
+E        =       O'10400
+OUT      =       O'20000
+         TBEGIN
+         A1      D'64
+         VL      A1
+         A6      1
+* ---- two loads together, an add behind them, a store behind that (EBM)
+         EBM
+         A0      A
+         V0      ,A0,A6                  ; port B
+         A0      B
+         V1      ,A0,A6                  ; port A
+         V2      V0+V1
+         A0      C
+         ,A0,A6  V2                      ; port C, with the loads still running
+         CMR
+         A0      OUT
+         ,A0,A6  V2
+* ---- the same with the store going to the words the loads read, DBM: in order
+         DBM
+         A0      D
+         V3      ,A0,A6
+         A0      E
+         V4      ,A0,A6
+         V5      V3+V4
+         A0      D
+         ,A0,A6  V5                      ; waits for the loads of D and E
+         A0      D
+         V6      ,A0,A6                  ; waits for the store
+         A0      OUT+100
+         ,A0,A6  V6
+* ---- block transfers on all three ports at once (EBM): B from A, T from B,
+* T to C; then B and T back out
+         EBM
+         A2      D'64
+         A0      A
+         B00,A2  ,A0                     ; port A
+         A0      B
+         T00,A2  ,A0                     ; port B
+         A0      C
+         ,A0     T00,A2                  ; port C: the T registers as they were loaded
+         CMR
+         A0      OUT+200
+         ,A0     B00,A2
+         A0      OUT+300
+         ,A0     T00,A2
+         A0      C
+         V7      ,A0,A6
+         A0      OUT+400
+         ,A0,A6  V7
+* ---- a vector load on each port and a store, chained (EBM), stepping by 3
+         A5      3
+         A0      A
+         V0      ,A0,A5
+         A0      B
+         V1      ,A0,A5
+         V2      V0*FV1
+         A0      E
+         ,A0,A5  V2
+         CMR
+         A0      E
+         V3      ,A0,A5
+         A0      OUT+500
+         ,A0,A6  V3
+* ---- scalar references wait for the ports, and the ports for them
+         A0      A
+         V4      ,A0,A6
+         S1      A+5,0
+         S2      B+6,0
+         S3      S1+S2
+         OUT+600,0 S3
+         A0      B
+         V5      ,A0,A6
+         V6      V4+V5
+         A0      OUT+700
+         ,A0,A6  V6
+         TPASS
+         TEND
+         ORG     A
+         CON     D'1,D'2,D'3,D'4,D'5,D'6,D'7,D'8
+         CON     D'9,D'10,D'11,D'12,D'13,D'14,D'15,D'16
+         CON     D'17,D'18,D'19,D'20,D'21,D'22,D'23,D'24
+         CON     D'25,D'26,D'27,D'28,D'29,D'30,D'31,D'32
+         CON     D'33,D'34,D'35,D'36,D'37,D'38,D'39,D'40
+         CON     D'41,D'42,D'43,D'44,D'45,D'46,D'47,D'48
+         CON     D'49,D'50,D'51,D'52,D'53,D'54,D'55,D'56
+         CON     D'57,D'58,D'59,D'60,D'61,D'62,D'63,D'64
+         ORG     B
+         CON     O'1000,O'2000,O'3000,O'4000,O'5000,O'6000,O'7000,O'10000
+         CON     O'11000,O'12000,O'13000,O'14000,O'15000,O'16000,O'17000,O'20000
+         CON     O'21000,O'22000,O'23000,O'24000,O'25000,O'26000,O'27000,O'30000
+         CON     O'31000,O'32000,O'33000,O'34000,O'35000,O'36000,O'37000,O'40000
+         CON     O'41000,O'42000,O'43000,O'44000,O'45000,O'46000,O'47000,O'50000
+         CON     O'51000,O'52000,O'53000,O'54000,O'55000,O'56000,O'57000,O'60000
+         CON     O'61000,O'62000,O'63000,O'64000,O'65000,O'66000,O'67000,O'70000
+         CON     O'71000,O'72000,O'73000,O'74000,O'75000,O'76000,O'77000,O'100000
+         ORG     D
+         CON     D'101,D'102,D'103,D'104,D'105,D'106,D'107,D'108
+         CON     D'109,D'110,D'111,D'112,D'113,D'114,D'115,D'116
+         CON     D'117,D'118,D'119,D'120,D'121,D'122,D'123,D'124
+         CON     D'125,D'126,D'127,D'128,D'129,D'130,D'131,D'132
+         CON     D'133,D'134,D'135,D'136,D'137,D'138,D'139,D'140
+         CON     D'141,D'142,D'143,D'144,D'145,D'146,D'147,D'148
+         CON     D'149,D'150,D'151,D'152,D'153,D'154,D'155,D'156
+         CON     D'157,D'158,D'159,D'160,D'161,D'162,D'163,D'164
+         ORG     E
+         CON     D'201,D'202,D'203,D'204,D'205,D'206,D'207,D'208
+         CON     D'209,D'210,D'211,D'212,D'213,D'214,D'215,D'216
+         CON     D'217,D'218,D'219,D'220,D'221,D'222,D'223,D'224
+         CON     D'225,D'226,D'227,D'228,D'229,D'230,D'231,D'232
+         CON     D'233,D'234,D'235,D'236,D'237,D'238,D'239,D'240
+         CON     D'241,D'242,D'243,D'244,D'245,D'246,D'247,D'248
+         CON     D'249,D'250,D'251,D'252,D'253,D'254,D'255,D'256
+         CON     D'257,D'258,D'259,D'260,D'261,D'262,D'263,D'264
+         END

@@ -1,0 +1,821 @@
+* xbench.cal: the kernels of the benchmark.  tools/py/bench.py makes a
+* program of them, for the CPU simulation and as a job for COS, runs it and
+* reads the times; docs/DEVELOPMENT.md has how.
+*
+* This file is not a program by itself.  The lines that begin with a star
+* and a letter divide it:
+*
+*   *I             what is done once, before anything is timed
+*   *K name units group text
+*                  a kernel.  What follows sets it up.  The time is the
+*                  clock periods from *T to *E, read off the real-time
+*                  clock, for as many repetitions as the word XREP holds;
+*                  bench.py divides it by the repetitions and by the units,
+*                  the elements one repetition works through.  What follows *E
+*                  leaves a sum in S1 that depends on everything the
+*                  kernel computed, and may be left out when *E finds it
+*                  there.
+*   *X             code behind the kernels
+*   *D             data
+*
+* The rules a kernel keeps:
+*
+* - Its syntax is what both assemblers take, this repository's and the CAL
+*   on the drive: every number above 7 with its base (D' or O'), no
+*   comment behind an instruction, no macro, no symbol that reads like a
+*   register (XA and VL1 do).
+* - It sets every register it reads, and a repetition starts from what the
+*   one before started from, so that the sum is the same for any number of
+*   repetitions and the reference model can say what it has to be.
+* - It reads the arrays ARRA, ARRB, IDXI and IDXJ and never writes them.
+*   ARRC and WORK are anybody's.
+* - The code from *T to *E is shorter than an instruction buffer (32 words),
+*   and bench.py puts it at the start of one: its jumps stay in the buffer
+*   unless leaving it is what the kernel is about.
+* - What it leaves under way at *E it waits for: memory is waited for by
+*   the program, a vector register by reading an element of it.
+* - A7 counts the repetitions.  B00 belongs to the return jumps; B77 and
+*   the names that begin with X belong to the program around the kernels,
+*   which also uses A7, S6 and S7 at *E, before the sum is formed.
+*
+*I
+         A1        0
+         A2        N
+         A5        D'1237
+         A6        7
+         S7        N-1
+XBI1     A3        A1+1
+         S1        +FA3
+         S1        +FS1
+         ARRA,A1   S1
+         A4        A3+A3
+         A4        A4+1
+         S1        +FA4
+         S1        +FS1
+         ARRB,A1   S1
+         A4        A1+A5
+         S1        A4
+         S1        S1&S7
+         IDXI,A1   S1
+         A4        A1*A5
+         A4        A4+A6
+         S1        A4
+         S1        S1&S7
+         IDXJ,A1   S1
+         S1        0
+         ARRC,A1   S1
+         WORK,A1   S1
+         A1        A1+1
+         A0        A2-A1
+         JAN       XBI1
+*
+* ARRA(i) = i + 1 and ARRB(i) = 2 i + 3 as floating-point numbers,
+* IDXI(i) = (i + 1237) mod N, which leads through all N words and back to
+* the first, and IDXJ(i) = (1237 i + 7) mod N, each number once, scattered.
+*
+*K EMPTY 4096 scalar a loop with nothing in it but its count
+*T
+         A7        XREP,0
+EMP1     A1        0
+         A2        N
+EMP2     S1        S1
+         A1        A1+1
+         A0        A2-A1
+         JAN       EMP2
+         A7        A7-1
+         A0        A7
+         JAN       EMP1
+*E
+         S1        A1
+*K SINT 4096 scalar integer work in registers: shifts, logic, bit counts, a product, sums
+*T
+         A7        XREP,0
+INT1     S1        XSEED,0
+         S3        0
+         A6        0
+         A1        N
+INT2     S2        S1
+         S2        S2<D'13
+         S1        S1\S2
+         S2        S1
+         S2        S2>D'7
+         S1        S1\S2
+         S2        S1
+         S2        S2<D'17
+         S1        S1\S2
+         A3        PS1
+         A4        ZS1
+         A5        A3*A4
+         A6        A6+A5
+         S3        S3+S1
+         A1        A1-1
+         A0        A1
+         JAN       INT2
+         A7        A7-1
+         A0        A7
+         JAN       INT1
+*E
+         S2        A6
+         S1        S3\S2
+*K SFP 4096 scalar floating point in registers: reciprocal, its correction, products, sums
+*T
+         A7        XREP,0
+FLT1     S5        0
+         A1        N
+FLT2     S1        +FA1
+         S1        +FS1
+         S2        /HS1
+         S3        S1*IS2
+         S2        S2*FS3
+         S4        S1*FS1
+         S4        S4+FS2
+         S5        S5+FS4
+         A1        A1-1
+         A0        A1
+         JAN       FLT2
+         A7        A7-1
+         A0        A7
+         JAN       FLT1
+*E
+         S1        S5
+*K BRANCH 4096 scalar jumps inside a buffer: a pair is one that is not taken and one that is
+*T
+         A7        XREP,0
+BRA1     A1        D'1024
+         A2        1
+         A3        0
+BRA2     A0        A2
+         JAZ       BRA9
+         J         BRA3
+BRA3     A3        A3+1
+         JAM       BRA9
+         J         BRA4
+BRA4     A3        A3+1
+         JAZ       BRA9
+         J         BRA5
+BRA5     A3        A3+1
+         JAM       BRA9
+         J         BRA6
+BRA6     A3        A3+1
+         A1        A1-1
+         A0        A1
+         JAN       BRA2
+         A7        A7-1
+         A0        A7
+         JAN       BRA1
+BRA9     S1        A3
+*E
+         S1        A3
+*K CALL3 4096 fetch calls of three routines a buffer each: caller and routines stay in the four buffers
+*T
+         A7        XREP,0
+CLN1     A1        D'512
+         A6        0
+CLN2     R         XF1
+         R         XF2
+         R         XF3
+         R         XF1
+         R         XF2
+         R         XF3
+         R         XF1
+         R         XF2
+         A1        A1-1
+         A0        A1
+         JAN       CLN2
+         A7        A7-1
+         A0        A7
+         JAN       CLN1
+*E
+         S1        A6
+*K CALL8 4096 fetch calls of eight routines a buffer each: nine blocks of code for four buffers
+*T
+         A7        XREP,0
+CLF1     A1        D'512
+         A6        0
+CLF2     R         XF1
+         R         XF2
+         R         XF3
+         R         XF4
+         R         XF5
+         R         XF6
+         R         XF7
+         R         XF8
+         A1        A1-1
+         A0        A1
+         JAN       CLF2
+         A7        A7-1
+         A0        A7
+         JAN       CLF1
+*E
+         S1        A6
+*K SLOAD 4096 smem a scalar load in a loop
+*T
+         A7        XREP,0
+SLD1     A1        0
+         A2        N
+SLD2     S1        ARRA,A1
+         A1        A1+1
+         A0        A2-A1
+         JAN       SLD2
+         A7        A7-1
+         A0        A7
+         JAN       SLD1
+*E
+*K SSTORE 4096 smem a scalar store in a loop
+         S1        XSEED,0
+*T
+         A7        XREP,0
+SSR1     A1        0
+         A2        N
+SSR2     ARRC,A1   S1
+         A1        A1+1
+         A0        A2-A1
+         JAN       SSR2
+         A7        A7-1
+         A0        A7
+         JAN       SSR1
+*E
+         A1        ARRC
+         A2        N
+         R         XCK
+*K SCOPY 4096 smem two scalar loads, an add and a store
+*T
+         A7        XREP,0
+SCP1     A1        0
+         A2        N
+SCP2     S1        ARRA,A1
+         S2        ARRB,A1
+         S3        S1+S2
+         ARRC,A1   S3
+         A1        A1+1
+         A0        A2-A1
+         JAN       SCP2
+         A7        A7-1
+         A0        A7
+         JAN       SCP1
+*E
+         A1        ARRC
+         A2        N
+         R         XCK
+*K CHASE 4096 smem a chain of loads, each from the address the one before brought
+*T
+         A7        XREP,0
+CHS1     A1        N
+         A3        0
+         A4        0
+CHS2     A3        IDXI,A3
+         A4        A4+A3
+         A1        A1-1
+         A0        A1
+         JAN       CHS2
+         A7        A7-1
+         A0        A7
+         JAN       CHS1
+*E
+         S1        A4
+*K RECUR 4096 smem a floating-point recurrence: load, subtract, multiply, store
+*T
+         A7        XREP,0
+REC1     A1        0
+         A2        N
+         S3        0
+         S4        0.4
+REC2     S1        ARRB,A1
+         S1        S1-FS3
+         S3        S1*FS4
+         ARRC,A1   S3
+         A1        A1+1
+         A0        A2-A1
+         JAN       REC2
+         A7        A7-1
+         A0        A7
+         JAN       REC1
+*E
+         A1        ARRC
+         A2        N
+         R         XCK
+*K SIEVE 4096 smem the sieve of Eratosthenes: stores, loads and jumps on what was loaded
+*T
+         A7        XREP,0
+SIV1     A1        0
+         A2        N
+         S1        1
+SIV2     WORK,A1   S1
+         A1        A1+1
+         A0        A2-A1
+         JAN       SIV2
+         A3        2
+         A5        D'64
+         S2        0
+SIV3     S0        WORK,A3
+         JSZ       SIV6
+         A4        A3*A3
+SIV4     A0        A4-A2
+         JAP       SIV6
+         WORK,A4   S2
+         A4        A4+A3
+         J         SIV4
+SIV6     A3        A3+1
+         A0        A3-A5
+         JAN       SIV3
+         A1        2
+         A6        0
+SIV7     A5        WORK,A1
+         A6        A6+A5
+         A1        A1+1
+         A0        A2-A1
+         JAN       SIV7
+         A7        A7-1
+         A0        A7
+         JAN       SIV1
+*E
+         S1        A6
+*K SORT 256 smem a Shell sort of 256 numbers: loads, compares and stores as the numbers fall
+         A5        D'64
+         VL        A5
+*T
+         A7        XREP,0
+SRT1     A1        0
+         A5        D'64
+         A6        D'256
+SRT0     A2        IDXJ
+         A0        A2+A1
+         V0        ,A0,1
+         A2        WORK
+         A0        A2+A1
+         ,A0,1     V0
+         A1        A1+A5
+         A0        A6-A1
+         JAN       SRT0
+         A1        0
+SRT2     A2        XGAP,A1
+         A0        A2
+         JAZ       SRT8
+         A3        A2
+SRT3     S1        WORK,A3
+         A4        A3
+SRT4     A5        A4-A2
+         A0        A5
+         JAM       SRT6
+         S2        WORK,A5
+         S0        S1-S2
+         JSP       SRT6
+         WORK,A4   S2
+         A4        A5
+         J         SRT4
+SRT6     WORK,A4   S1
+         A3        A3+1
+         A0        A6-A3
+         JAN       SRT3
+         A1        A1+1
+         J         SRT2
+SRT8     A7        A7-1
+         A0        A7
+         JAN       SRT1
+*E
+         A1        WORK
+         A2        D'256
+         R         XCK
+*K VADD 32768 vreg a vector add of registers, 64 elements
+         A5        D'64
+         VL        A5
+         A0        ARRA
+         V0        ,A0,1
+         A0        ARRB
+         V1        ,A0,1
+*T
+         A7        XREP,0
+VAD1     A4        D'512
+VAD2     V2        V0+V1
+         A4        A4-1
+         A0        A4
+         JAN       VAD2
+         A7        A7-1
+         A0        A7
+         JAN       VAD1
+         S1        V2,A0
+*E
+         R         XRED
+*K VFP 16384 vreg floating-point vectors in registers: multiply, add, reciprocal, multiply, chained
+         A5        D'64
+         VL        A5
+         A0        ARRA
+         V0        ,A0,1
+         A0        ARRB
+         V1        ,A0,1
+*T
+         A7        XREP,0
+VFL1     A4        D'256
+VFL2     V2        V0*FV1
+         V3        V2+FV0
+         V4        /HV1
+         V5        V3*FV4
+         A4        A4-1
+         A0        A4
+         JAN       VFL2
+         A7        A7-1
+         A0        A7
+         JAN       VFL1
+         S1        V5,A0
+*E
+         V2        V5!V5
+         R         XRED
+*K VMIX 16384 vreg vectors in registers: logic, a mask and a merge, bit count, shift, integer add
+         A5        D'64
+         VL        A5
+         A0        IDXI
+         V0        ,A0,1
+         A0        IDXJ
+         V1        ,A0,1
+*T
+         A7        XREP,0
+         A3        3
+         S1        4
+VMX1     A4        D'256
+VMX2     V2        V0&V1
+         V3        S1&V1
+         VM        V3,N
+         V4        V2!V0&VM
+         V5        PV4
+         V6        V4>A3
+         V7        V5+V6
+         A4        A4-1
+         A0        A4
+         JAN       VMX2
+         A7        A7-1
+         A0        A7
+         JAN       VMX1
+         S1        V7,A0
+*E
+         V2        V7!V7
+         R         XRED
+*K VLOAD 32768 vmem vector loads of 64 words in a row
+         A5        D'64
+         VL        A5
+*T
+         A7        XREP,0
+         A6        D'8
+         A7        A7*A6
+VLD1     A1        ARRA
+         A4        D'64
+VLD2     A0        A1
+         V0        ,A0,1
+         A1        A1+A5
+         A4        A4-1
+         A0        A4
+         JAN       VLD2
+         A7        A7-1
+         A0        A7
+         JAN       VLD1
+         S1        V0,A0
+*E
+         V2        V0!V0
+         R         XRED
+*K VSTORE 32768 vmem vector stores of 64 words in a row
+         A5        D'64
+         VL        A5
+         A0        ARRA
+         V0        ,A0,1
+*T
+         A7        XREP,0
+         A6        D'8
+         A7        A7*A6
+VSR1     A1        ARRC
+         A4        D'64
+VSR2     A0        A1
+         ,A0,1     V0
+         A1        A1+A5
+         A4        A4-1
+         A0        A4
+         JAN       VSR2
+         A7        A7-1
+         A0        A7
+         JAN       VSR1
+*E
+         A1        ARRC
+         A2        N
+         R         XCK
+*K VCOPY 16384 vmem two vector loads, an integer add and a vector store
+         A5        D'64
+         VL        A5
+*T
+         A7        XREP,0
+         A6        4
+         A7        A7*A6
+VCP1     A1        ARRA
+         A2        ARRB
+         A3        ARRC
+         A4        D'64
+VCP2     A0        A1
+         V0        ,A0,1
+         A0        A2
+         V1        ,A0,1
+         V2        V0+V1
+         A0        A3
+         ,A0,1     V2
+         A1        A1+A5
+         A2        A2+A5
+         A3        A3+A5
+         A4        A4-1
+         A0        A4
+         JAN       VCP2
+         A7        A7-1
+         A0        A7
+         JAN       VCP1
+*E
+         A1        ARRC
+         A2        N
+         R         XCK
+*K VSTRIDE 4096 vmem vector loads of every sixteenth word
+         A5        D'64
+         VL        A5
+*T
+         A7        XREP,0
+         A6        D'16
+         A7        A7*A6
+VSD1     A1        ARRA
+         A3        D'1024
+         A4        4
+VSD2     A0        A1
+         V0        ,A0,A6
+         A1        A1+A3
+         A4        A4-1
+         A0        A4
+         JAN       VSD2
+         A7        A7-1
+         A0        A7
+         JAN       VSD1
+         S1        V0,A0
+*E
+         V2        V0!V0
+         R         XRED
+*K GATHER 16384 vmem gathers: a load of 64 indices, then the 64 words they name
+         A5        D'64
+         VL        A5
+         A0        ARRA
+         V0        ,A0,1
+*T
+         A7        XREP,0
+         A6        4
+         A7        A7*A6
+GAT1     A1        ARRA
+         A2        IDXJ
+         A4        D'64
+         V3        V0\V0
+GAT2     A0        A2
+         V1        ,A0,1
+         A0        A1
+         V2        ,A0,V1
+         V3        V3+V2
+         A2        A2+A5
+         A4        A4-1
+         A0        A4
+         JAN       GAT2
+         A7        A7-1
+         A0        A7
+         JAN       GAT1
+         S1        V3,A0
+*E
+         V2        V3!V3
+         R         XRED
+*K SCATTER 16384 vmem scatters: loads of 64 indices and 64 words, then the words to where the indices say
+         A5        D'64
+         VL        A5
+*T
+         A7        XREP,0
+         A6        4
+         A7        A7*A6
+SCT1     A1        ARRC
+         A2        IDXJ
+         A3        ARRA
+         A4        D'64
+SCT2     A0        A2
+         V1        ,A0,1
+         A0        A3
+         V0        ,A0,1
+         A0        A1
+         ,A0,V1    V0
+         A2        A2+A5
+         A3        A3+A5
+         A4        A4-1
+         A0        A4
+         JAN       SCT2
+         A7        A7-1
+         A0        A7
+         JAN       SCT1
+*E
+         A1        ARRC
+         A2        N
+         R         XCK
+*K BLOCK 16384 vmem block transfers: 64 T registers from memory and back to it elsewhere
+*T
+         A7        XREP,0
+         A6        4
+         A7        A7*A6
+         A5        D'64
+BLK1     A1        ARRA
+         A2        ARRC
+         A4        D'64
+BLK2     A0        A1
+         T00,A5    ,A0
+         A0        A2
+         ,A0       T00,A5
+         A1        A1+A5
+         A2        A2+A5
+         A4        A4-1
+         A0        A4
+         JAN       BLK2
+         A7        A7-1
+         A0        A7
+         JAN       BLK1
+*E
+         A1        ARRC
+         A2        N
+         R         XCK
+*K SAXPY 16384 vfp c = 3 a + b in floating point: two loads, multiply, add and store, chained
+         A5        D'64
+         VL        A5
+*T
+         A7        XREP,0
+         A6        4
+         A7        A7*A6
+         A3        3
+         S1        +FA3
+         S1        +FS1
+SAX1     A1        ARRA
+         A2        ARRB
+         A3        ARRC
+         A4        D'64
+SAX2     A0        A1
+         V0        ,A0,1
+         A0        A2
+         V1        ,A0,1
+         V2        S1*FV0
+         V3        V2+FV1
+         A0        A3
+         ,A0,1     V3
+         A1        A1+A5
+         A2        A2+A5
+         A3        A3+A5
+         A4        A4-1
+         A0        A4
+         JAN       SAX2
+         A7        A7-1
+         A0        A7
+         JAN       SAX1
+*E
+         A1        ARRC
+         A2        N
+         R         XCK
+*K DOT 16384 vfp a dot product: two loads, a multiply and a running sum, and the 64 sums added up
+         A5        D'64
+         VL        A5
+         A0        ARRA
+         V0        ,A0,1
+*T
+         A7        XREP,0
+         A6        4
+         A7        A7*A6
+DOT1     A1        ARRA
+         A2        ARRB
+         A4        D'64
+         V4        V0\V0
+DOT2     A0        A1
+         V0        ,A0,1
+         A0        A2
+         V1        ,A0,1
+         V2        V0*FV1
+         V4        V4+FV2
+         A1        A1+A5
+         A2        A2+A5
+         A4        A4-1
+         A0        A4
+         JAN       DOT2
+         S1        0
+         A1        0
+DOT3     S2        V4,A1
+         S1        S1+FS2
+         A1        A1+1
+         A0        A5-A1
+         JAN       DOT3
+         A7        A7-1
+         A0        A7
+         JAN       DOT1
+*E
+*K HYDRO 16128 vfp the first Livermore loop: c(k) = 5 + b(k) * (2 a(k+10) + 3 a(k+11))
+         A5        D'64
+         VL        A5
+*T
+         A7        XREP,0
+         A6        4
+         A7        A7*A6
+         A3        2
+         S1        +FA3
+         S1        +FS1
+         A3        3
+         S2        +FA3
+         S2        +FS2
+         A3        5
+         S3        +FA3
+         S3        +FS3
+HYD1     A1        ARRA+D'10
+         A2        ARRB
+         A3        ARRC
+         A4        D'63
+HYD2     A0        A1
+         V0        ,A0,1
+         A0        A1+1
+         V1        ,A0,1
+         A0        A2
+         V2        ,A0,1
+         V3        S1*FV0
+         V4        S2*FV1
+         V5        V3+FV4
+         V6        V2*FV5
+         V7        S3+FV6
+         A0        A3
+         ,A0,1     V7
+         A1        A1+A5
+         A2        A2+A5
+         A3        A3+A5
+         A4        A4-1
+         A0        A4
+         JAN       HYD2
+         A7        A7-1
+         A0        A7
+         JAN       HYD1
+*E
+         A1        ARRC
+         A2        D'4032
+         R         XCK
+*X
+*
+* The routines CALL3 and CALL8 call, 33 words apart, so that no two are in
+* the same block of 32.
+*
+XF1      A6        A6+1
+         J         B00
+         BSS       D'32
+XF2      A6        A6+1
+         J         B00
+         BSS       D'32
+XF3      A6        A6+1
+         J         B00
+         BSS       D'32
+XF4      A6        A6+1
+         J         B00
+         BSS       D'32
+XF5      A6        A6+1
+         J         B00
+         BSS       D'32
+XF6      A6        A6+1
+         J         B00
+         BSS       D'32
+XF7      A6        A6+1
+         J         B00
+         BSS       D'32
+XF8      A6        A6+1
+         J         B00
+         BSS       D'32
+*
+* XCK: the (A2) words from (A1) added up into S1, the sum turned by one bit
+* before each word, so that it matters where a word stands.
+*
+XCK      S1        0
+         A3        1
+XCK1     S2        0,A1
+         S1        S1,S1<A3
+         S1        S1+S2
+         A1        A1+1
+         A2        A2-1
+         A0        A2
+         JAN       XCK1
+         J         B00
+*
+* XRED: the 64 elements of V2 added up into S1 the same way.
+*
+XRED     S1        0
+         A1        0
+         A2        D'64
+         A3        1
+XRD1     S2        V2,A1
+         S1        S1,S1<A3
+         S1        S1+S2
+         A1        A1+1
+         A0        A2-A1
+         JAN       XRD1
+         J         B00
+*D
+XSEED    CON       O'0123456701234567012345
+XGAP     CON       D'57
+         CON       D'23
+         CON       D'10
+         CON       4
+         CON       1
+         CON       0
+ARRA     BSS       N
+ARRB     BSS       N
+ARRC     BSS       N
+IDXI     BSS       N
+IDXJ     BSS       N
+WORK     BSS       N

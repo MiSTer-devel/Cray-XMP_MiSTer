@@ -1,4 +1,4 @@
-// The I/O Subsystem: the three I/O Processors of ios_core.v and the
+// The I/O Subsystem: the two I/O Processors of ios_core.v and the
 // interfaces on their channels.
 //
 //   MIOP   17                            the Peripheral Expander with its
@@ -11,12 +11,11 @@
 //                                        central memory
 //          20 to 22, 24 to 26, 30 to 32  nine DD-29 disk drives
 //          42/43                         a console
-//   XIOP   42/43                         a console
 //
-// The consoles are numbered 0 to 3 for the MIOP's, 4 for the BIOP's and 5
-// for the XIOP's.  Every other channel has nothing on it.  The software has
-// more on some of them (block multiplexer channels on the XIOP, an error log
-// and a front-end concentrator on the MIOP) and works without.
+// The consoles are numbered 0 to 3 for the MIOP's and 4 for the BIOP's.
+// Every other channel has nothing on it.  The software has more on some of
+// them (an error log and a front-end concentrator on the MIOP) and works
+// without.
 
 module ios #(
 	parameter CLOCKS_PER_MS  = 80000,
@@ -37,12 +36,12 @@ module ios #(
 
 	// the consoles: a key is held out until it is taken; a character is
 	// held out until it is taken
-	input  wire [ 5:0] i_key_valid,
-	input  wire [41:0] i_key,
-	output wire [ 5:0] o_key_ready,
-	output wire [ 5:0] o_char_valid,
-	output wire [41:0] o_char,
-	input  wire [ 5:0] i_char_ready,
+	input  wire [ 4:0] i_key_valid,
+	input  wire [34:0] i_key,
+	output wire [ 4:0] o_key_ready,
+	output wire [ 4:0] o_char_valid,
+	output wire [34:0] o_char,
+	input  wire [ 4:0] i_char_ready,
 
 	// the tape of the Peripheral Expander: a .tap file in 64-bit words, its
 	// first byte in bits 63 to 56 of word 0
@@ -119,27 +118,27 @@ module ios #(
 	input  wire        i_drive_buff_wr,
 
 	// for the simulation
-	output wire [ 2:0] o_step,
-	output wire [47:0] o_p
+	output wire [ 1:0] o_step,
+	output wire [31:0] o_p
 );
 
-	// the channel buses of ios_core: element 0 the MIOP, 1 the BIOP, 2 the XIOP
-	wire [ 2:0] strobe;
-	wire [17:0] number;
-	wire [11:0] fn;
-	wire [47:0] a;
-	reg  [47:0] data;
-	reg [83:0] busy, done, ask;
-	wire [ 2:0] master_clear;
-	wire [ 2:0] dma_ack;
-	wire [47:0] dma_rdata;
+	// the channel buses of ios_core: element 0 the MIOP, 1 the BIOP
+	wire [ 1:0] strobe;
+	wire [11:0] number;
+	wire [ 7:0] fn;
+	wire [31:0] a;
+	reg  [31:0] data;
+	reg [55:0] busy, done, ask;
+	wire [ 1:0] master_clear;
+	wire [ 1:0] dma_ack;
+	wire [31:0] dma_rdata;
 
 	// ---- the consoles
-	wire [15:0] c_data[0:5];
-	wire [5:0] c_key_done, c_busy, c_done;
+	wire [15:0] c_data[0:4];
+	wire [4:0] c_key_done, c_busy, c_done;
 	// console n is on IOP c_iop, and its keyboard on channel c_channel (decimal)
 	function [1:0] c_iop(input integer n);
-		c_iop = (n < 4) ? 2'd0 : (n == 4) ? 2'd1 : 2'd2;
+		c_iop = (n < 4) ? 2'd0 : 2'd1;
 	endfunction
 	function [5:0] c_channel(input integer n);
 		c_channel = (n < 4) ? (6'd32 + 6'd2 * n[5:0]) : 6'd34;
@@ -191,10 +190,10 @@ module ios #(
 
 	integer k;
 	always @(*) begin
-		data            = 48'd0;
-		busy            = 84'd0;
-		done            = 84'd0;
-		ask             = 84'd0;
+		data            = 32'd0;
+		busy            = 56'd0;
+		done            = 56'd0;
+		ask             = 56'd0;
 		data[15:0]      = x_data | l_data;
 		busy[EXB-12]    = x_busy;
 		done[EXB-12]    = x_done;
@@ -212,7 +211,7 @@ module ios #(
 			busy[28+k_channel(k)-12] = k_busy[k];
 			done[28+k_channel(k)-12] = k_done[k];
 		end
-		for (k = 0; k < 6; k = k + 1) begin
+		for (k = 0; k < 5; k = k + 1) begin
 			data[16*c_iop(k)+:16]             = data[16*c_iop(k)+:16] | c_data[k];
 			done[28*c_iop(k)+c_channel(k)-12] = c_key_done[k];
 			busy[28*c_iop(k)+c_channel(k)-11] = c_busy[k];
@@ -241,10 +240,10 @@ module ios #(
 		.i_ch_busy     (busy),
 		.i_ch_done     (done),
 		.i_ch_ask      (ask),
-		.i_dma_req     ({1'b0, b_dma_req, m_dma_req}),
-		.i_dma_we      ({1'b0, h_dma_req ? h_dma_we : k_dma_we, l_dma_req ? l_dma_we : x_dma_we}),
-		.i_dma_addr    ({16'b0, h_dma_req ? h_dma_addr : k_dma_addr, l_dma_req ? l_dma_addr : x_dma_addr}),
-		.i_dma_wdata   ({16'b0, h_dma_req ? h_dma_wdata : k_dma_wdata, l_dma_req ? l_dma_wdata : x_dma_wdata}),
+		.i_dma_req     ({b_dma_req, m_dma_req}),
+		.i_dma_we      ({h_dma_req ? h_dma_we : k_dma_we, l_dma_req ? l_dma_we : x_dma_we}),
+		.i_dma_addr    ({h_dma_req ? h_dma_addr : k_dma_addr, l_dma_req ? l_dma_addr : x_dma_addr}),
+		.i_dma_wdata   ({h_dma_req ? h_dma_wdata : k_dma_wdata, l_dma_req ? l_dma_wdata : x_dma_wdata}),
 		.o_dma_ack     (dma_ack),
 		.o_dma_rdata   (dma_rdata),
 		.o_step        (o_step),
@@ -423,8 +422,8 @@ module ios #(
 
 	genvar g;
 	generate
-		for (g = 0; g < 6; g = g + 1) begin : g_console
-			localparam integer       IOP      = (g < 4) ? 0 : (g == 4) ? 1 : 2;
+		for (g = 0; g < 5; g = g + 1) begin : g_console
+			localparam integer       IOP      = (g < 4) ? 0 : 1;
 			localparam         [5:0] KEYBOARD = (g < 4) ? (32 + 2 * g) : 34;
 			wire       here = strobe[IOP];
 			wire [5:0] channel = number[6*IOP+:6];

@@ -11,14 +11,16 @@
     ioptest.py times
     ioptest.py tape [SYSTEM]
 
-rand runs random programs, seeds FIRST to LAST, each in two kinds (every parcel
-random; mostly register work with functions on the processor's own channels)
-and a short directed one.  kernel has the system model boot the I/O Subsystem
+rand runs random programs, seeds FIRST to LAST, each in three kinds (every
+parcel random; mostly register work with functions on the processor's own
+channels; a program that stays in 256 parcels, with loops, branches of up to
+45 parcels either way and stores into its own parcels, for the instruction
+stack) and a short directed one.  kernel has the system model boot the I/O Subsystem
 kernel of the COS 1.17 software in SYSTEM (default: the directory the
 environment variable CRAY_XMP_SYSTEM names) as far as its first
-question, once for each of the three processors, and replays every step.
+question, once for each of the two processors, and replays every step.
 
-boot runs the I/O Subsystem in hardware description (module ios: the three
+boot runs the I/O Subsystem in hardware description (module ios: the two
 processors, their Local Memories, real-time clocks, Buffer Memory channels,
 the channels between them, the consoles, the Peripheral Expander, and the
 BIOP's disk drives and channel into central memory) on the same kernel.  The
@@ -27,12 +29,12 @@ told, and is asked to list the files on the expander disk; the BIOP tests its
 nine drives.  Without --full the kernel's long tests of memory are left out.
 
 selftest runs the self-checking program of tests/ios/selftest.py in place of
-the kernel, on the system model and on the same three processors in hardware
+the kernel, on the system model and on the same two processors in hardware
 description: the real-time clock, the order in which channels that ask for an
 interrupt are reported, the expander's tape and disk, the start of one
-processor by another, a drive of the BIOP and its channel into central
-memory, a word from each processor to each other one, and the printer.  Both
-must report OK three times and print the same.  It runs a second time on the
+processor by the other, a drive of the BIOP and its channel into central
+memory, a word from each processor to the other, and the printer.  Both
+must report OK twice and print the same.  It runs a second time on the
 whole machine, where the program also starts the CPU on a program of a few
 instructions and exchanges parcels with it over the channel pair, to see
 that a parcel that waits is not lost and what I/O Master Clear does.  Three
@@ -70,7 +72,8 @@ the file has to be back.
 
 The model writes a record of each step (tools/crates/ios/src/replay.rs) and
 the simulation of the hardware description follows it: same interrupts, same
-functions, same registers after every step, same memory at the end.
+functions, same registers after every step, every step issued in the same
+clock, same memory at the end.
 Needs make tools and make -C sim iop ios xmp bridge.  Failing records stay in
 build/iop.
 """
@@ -112,7 +115,7 @@ def replay(name, make):
 def rand(first, last, steps, jobs):
     cases = [('directed', [RANDOM, 'directed'])]
     for seed in range(first, last + 1):
-        for kind in ('noise', 'work'):
+        for kind in ('noise', 'work', 'loops'):
             cases.append(('%s%d' % (kind, seed), [RANDOM, str(seed), str(steps), kind]))
     with ThreadPoolExecutor(jobs) as pool:
         results = list(pool.map(lambda c: replay(*c), cases))
@@ -145,14 +148,14 @@ def kernel(system):
         print('IOP %d: %s' % (n, line), flush=True)
         return r.returncode == 0 and model.returncode == 0
 
-    with ThreadPoolExecutor(3) as pool:
-        good = list(pool.map(one, [0, 1, 3]))
-    print('3 boots, %d failed' % good.count(False))
+    with ThreadPoolExecutor(2) as pool:
+        good = list(pool.map(one, [0, 1]))
+    print('2 boots, %d failed' % good.count(False))
     return all(good)
 
 
 def boot(system, full):
-    """The three processors in hardware description boot the kernel."""
+    """The two processors in hardware description boot the kernel."""
     cmd = [BOOT, os.path.join(system, 'target/cos_117/iop_kern.bin'), os.path.join(system, 'boot_tape.tap'),
            os.path.join(system, 'exp_disk.img'),
            '--type', 'ENTER DATE [MM/DD/YY]=10/05/89\\r', '--type', 'ENTER TIME [HH:MM:SS]=01:02:03\\r',
@@ -162,17 +165,17 @@ def boot(system, full):
         cmd += ['--poke', '42B7=0200', '--poke', '43DA=0']
     r = subprocess.run(cmd, capture_output=True, text=True, errors='replace')
     out = r.stdout
-    wanted = ['MOS TEST COMPLETE', 'IOP-0 KERNEL, VERSION 4.2.2', 'IOP1 A->A', 'IOP3 A->A', 'MOS SIZE  100K',
+    wanted = ['MOS TEST COMPLETE', 'IOP-0 KERNEL, VERSION 4.2.2', 'IOP1 A->A', 'MOS SIZE  100K',
               'AUTODMP ON', 'ENTER DATE', 'ENTER TIME', '10/05/89  01:02:03',
               # the files on the expander disk, as the system model lists them
               'IOPKERNEL             01/01/89 01:01:01         5120', 'COS_117               01/01/89 01:01:01         279040',
               'MINSTALL              01/01/89 01:01:01         80', 'TOTAL                  ---------------          850596',
               'FSTAT COMPLETE',
-              'console of the BIOP: IOP-1 KERNEL, VERSION 4.2.2',
-              'console of the XIOP: IOP-3 KERNEL, VERSION 4.2.2']
+              'console of the BIOP: IOP-1 KERNEL, VERSION 4.2.2']
     missing = [w for w in wanted if w not in out]
-    # the BIOP tests its nine drives and has nothing to report
-    missing += ['not ' + w for w in ('CHANNEL TIMEOUT', 'DATA ERROR', 'SELECT ERROR') if w in out]
+    # the BIOP tests its nine drives and has nothing to report, and the kernel's
+    # list of its channels has no third processor
+    missing += ['not ' + w for w in ('CHANNEL TIMEOUT', 'DATA ERROR', 'SELECT ERROR', 'IOP3 A->A') if w in out]
     print((out.strip().splitlines() or ['no output'])[-3][:100])
     for w in missing:
         print('FAIL: `%s` was shown' % w[4:] if w.startswith('not ') else 'FAIL: `%s` was not shown' % w)
@@ -213,7 +216,7 @@ def selftest():
         subprocess.run([sys.executable, os.path.join(ROOT, 'tests/ios/selftest.py'), there] + (['--cpu'] if cpu else []), check=True)
         script = os.path.join(OUT, 'selftest.script')
         with open(script, 'w') as f:
-            f.write('type kernel AB\nrun 80\nscreen kernel\nscreen 1.1\nscreen 3.1\nprinter\n')
+            f.write('type kernel AB\nrun 80\nscreen kernel\nscreen 1.1\nprinter\n')
         ran = subprocess.run([SYS, there, '--script', script, '--quiet'], capture_output=True, text=True, errors='replace')
         model, summary = ran.stdout, ran.stderr
         said = [line.strip() for line in model.splitlines() if ':' in line and len(line.strip()) <= 5]
@@ -228,7 +231,7 @@ def selftest():
         if '---- printer at' in model:
             said.append(model.split('---- printer at', 1)[1].split('\n', 1)[1].split('\n----', 1)[0].replace('\n', '<nl>'))
         shown += [line[len('printed: '):] for line in hardware.splitlines() if line.startswith('printed: ')]
-        want = ['0:OK', '1:OK', '3:OK', '<0c>PRINT!<nl> XX <nl>PR<nl>']
+        want = ['0:OK', '1:OK', '<0c>PRINT!<nl> XX <nl>PR<nl>']
         if cpu:
             said += ['held' if line.rstrip().endswith(', held') else 'running' for line in summary.splitlines() if line.strip().startswith('CPU:')]
             shown += ['held' if 'is held by Master Clear' in line else 'running' for line in lines if line.startswith('the CPU ran for')]

@@ -32,10 +32,14 @@
 //!   (Local Memory error, which never reports one), 4 RTC (real-time
 //!   clock).  Channels 5 to 47 octal are reached through the `Channels`
 //!   trait, which also owns their Busy, Done and Interrupt Enable flags.
-//! * Time is counted in clock periods of 12.5 ns.  `step` returns what the
-//!   instruction took and the real-time clock counts it; its Done flag sets
-//!   every 80,000 clock periods.  The times are estimates from the manual's
-//!   sequence charts (see `CLOCK_PERIODS` in `iop.rs`).
+//! * Time is counted in clock periods of 12.5 ns.  An instruction does all
+//!   it does in the clock period it issues in, and issues when what it
+//!   needs is free: while those before it are still under way if it needs
+//!   nothing they hold, and from an instruction stack of 32 parcels that is
+//!   filled ahead of it (spec part 8; `can_issue`, `issued` and `tick` in
+//!   `iop.rs`).  `step` returns the clock periods to the issue, that one
+//!   included, and the real-time clock counts them; its Done flag sets every
+//!   80,000 clock periods.
 //!
 //! # API
 //!
@@ -43,7 +47,7 @@
 //! Iop::new()                                   power-up: all zero, Master Clear applied
 //! iop.master_clear()                           held until the first interrupt
 //! iop.memory_mut()                             Local Memory, for the dead start load and DMA
-//! iop.step(&mut channels) -> u32               one instruction or one interrupt; clock periods
+//! iop.step(&mut channels) -> u32               one instruction or one interrupt; clock periods to its issue
 //! iop.advance(clock_periods)                   time passes, nothing executes
 //! iop.p() a() b() c() e() operand(d) operands() exit_stack() memory()
 //! iop.interrupt_enable() interrupt_enable_delayed() held() rtc() pfr_register()

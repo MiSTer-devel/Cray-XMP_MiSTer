@@ -32,7 +32,7 @@ else is decimal.
 | T | T0201D, CRAY-1 S IOS Software Workbook, Sept 1981 | `manuals/ios/T0201D-...September_1981.OCR.pdf` |
 | SM | SM-0046 G, IOS Software Internal Reference, Sept 1988 | `manuals/ios/SM-0046-G-...September_1988.OCR.pdf` |
 | OG | SG-0051 D, IOS Operations Guide, Oct 1984 | `manuals/ios/SG-0051D-01_IO_Subsystem_[IOS]_Operations_Guide_Oct84.pdf` |
-| CD | CSM-1009, IOS Models C and D System Programmer Reference, Apr 1989. A later model; used only where it clarifies wording. | `manuals/ios/CSM-1009-000_...Apr89.pdf` |
+| CD | CSM-1009, IOS Models C and D System Programmer Reference, Apr 1989. A later model: used where it clarifies wording, and for the conditions of instruction issue (part 8.2), which HR-0030 gives only in pieces. | `manuals/ios/CSM-1009-000_...Apr89.pdf` |
 | sim | cray-sim source, `cray-sim/simulator/sim_lib/<file>:<line>`. Non-commercial licence: behaviour is described here in my own words, nothing is copied. | |
 | cfg | `cray-sim/cos_117.cfg:<line>` | |
 | kern | The IOS kernel that COS 1.17 boots with: `cray-sim/target/cos_117/iop_kern.bin` (20480 parcels; byte-identical to `articles/modularcircuits/the-cray-files/the-hunt-for-the-red-bootcode_files/iop_boot.img`), read with the disassembly `cray-sim/target/cos_117/disasm/iop_kern.asm`. `[kern 22F7]` is parcel address 0x22F7. The overlay disassemblies cited in part 8 are in `cray-sim/target/cos_117/disasm/iop_overlay1/`. | |
@@ -81,7 +81,7 @@ in part 10.
    flag that sets when the manual says it should not is a fatal halt [kern 4A72, table at 0D2B].
 7. The software contains delay loops and counted waits that assume real instruction and device
    times. The two that can break a boot are the MIOP's fixed wait while another IOP dead
-   starts and the 400-iteration wait for the Peripheral Expander's Busy flag (part 8.3).
+   starts and the 400-iteration wait for the Peripheral Expander's Busy flag (part 8.7).
 
 ---
 
@@ -256,7 +256,7 @@ product, 2 add, 3 subtract, 4 store, 5 add and store, 6 increment, 7 decrement (
 ### 4.3 Table
 
 "P" is the number of parcels. "CP" is the clock period, counted from issue at CP 0, in which
-HR-0030 delivers the result; it is given only as timing background (part 8). "OR[d]" is the
+HR-0030 delivers the result; what the instructions behind it wait for is in part 8.2. "OR[d]" is the
 operand register selected by d, "OR[B]" the one selected by B, "M[x]" the Local Memory parcel
 at address x. Every instruction leaves A, C, B, operand registers and memory unchanged unless
 the row says otherwise.
@@ -388,9 +388,10 @@ decodes the same way and, when a 2-parcel conditional branch is not taken, advan
 - A return jump stores the address of the next sequential instruction: P + 1 for 072, 073, 076
   and their conditional forms, P + 2 for 077 and its conditional forms [B 121, 6-61]
   [B 126, 6-66].
-- On the real machine relative branches of at most 9 parcels forward or 11 parcels back stay
-  inside the instruction stack and cost 5 clock periods; absolute branches always refill the
-  stack from memory [B 29, 3-5] [IA 32, 2-6]. This is timing only.
+- On the real machine relative branches of at most 9 parcels forward or 11 parcels back always
+  stay inside the instruction stack and cost 5 clock periods, longer ones may; absolute
+  branches always refill the stack from memory [B 29, 3-5] [IA 32, 2-6]. Part 8.3 has the
+  mechanism. This is timing only.
 
 ### 5.2 Push (return jump or interrupt)
 
@@ -566,7 +567,7 @@ is 1 ms at 12.5 ns. There is no Busy flag. The counter cannot be written [B 52, 
 | RTC : 10 | A = counter bits 16 to 1 (0 to 39,999, that is 116077 octal); one count is 2 clock periods |
 
 Source [B 52-53, 5-12 and 5-13]. The 1981 workbook notes that only some machines could read
-the counter [T 77, 4.9]. cray-sim's clock is described in part 8.4.
+the counter [T 77, 4.9]. cray-sim's clock is described in part 8.8.
 
 ### 6.7 Channel 5 and channels 6 to 13
 
@@ -664,18 +665,232 @@ the exit stack, including the handler address in entry 0. The only mode bit is I
   "When operations require exact timing information ... maintenance personnel should be
   contacted to verify the clock period" [B 20, 1-8]. The IOS clock is independent of the
   mainframe clock [B 44, 5-4].
-- Execution times are in the CP column of part 4.3. Register operations take 1 to 5 clock
-  periods, a memory read 7 to 9, a read-modify-write 13, a channel flag test 5, a branch inside
-  the instruction stack 5, a branch that refills the stack about 9 or more [B 119, 6-59]
-  [B 123, 6-63]. A channel function costs about 1 clock period for output and 4 to 6 for
-  input [T 72, 4.4].
+- The result times are in the CP column of part 4.3. Register operations deliver in 1 to 5
+  clock periods, a memory read in 7 to 9, a read-modify-write stores in 13, a channel flag test
+  takes 5, a branch inside the instruction stack 5, a branch that refills the stack 9 or more
+  [B 119, 6-59] [B 123, 6-63]. A channel function costs about 1 clock period for output and 4
+  to 6 for input [T 72, 4.4].
+- These are not the times from one instruction to the next: an instruction issues while those
+  before it are still under way if it needs nothing they hold (part 8.2), and it issues from
+  an instruction stack that is filled ahead of it (part 8.3).
 - No manual that was read states an instruction rate (searched for "instructions per second"
-  and "MIPS"). **Derived estimate:** weighting the CP column by the opcode mix of the kernel
-  image gives about 4.4 clock periods per instruction, about 18 million instructions per
-  second. Allowing for stack refills and memory conflicts, 10 to 20 million instructions per
-  second is a fair range. This number is mine, not Cray's.
+  and "MIPS"). With the rules below the kernel of COS 1.17 runs at 3.2 clock periods an
+  instruction on the BIOP and 4.4 on the MIOP while it boots, 18 to 25 million instructions a
+  second. This number is mine, not Cray's.
 
-### 8.2 The real-time clock in the software
+### 8.2 When an instruction issues
+
+The model (`tools/crates/ios/src/iop.rs`) and the hardware description
+(`rtl/ios/iop_cpu.v`) do everything an instruction does in the clock period it issues in.
+The clock periods of the manual's sequences decide only when the instructions behind it may
+issue. The two keep the same rules and are compared clock period for clock period.
+
+**Sources.** HR-0030 shows that instructions overlap (a shift delivers in clock period 3 and
+"Shift instructions require 2 CPs" [B 39, 4-3]; the DP register holds a pointer "during the
+delay period" while "instruction issue can be blocked until the path into the RP register is
+free" [B 30, 3-6]; three circular shifts are the 5 clock periods the exit stack needs
+[B 34, 3-10], which two would be if a shift took 3), but it names the condition for a few
+instructions only. HR-0808 has the same sequences one clock period earlier and adds for 040:
+"Another instruction that would alter the state of the carry flag before CP 4 cannot issue in
+CP 1 or CP 2" [1S 301, 6-35]. The complete statement is in the manual of the later Models C
+and D: "Instruction issue conflicts" [CD 157-159, 7-2 to 7-4] and a "Hold Issue Conditions"
+paragraph on every instruction page; its sequences are HR-0030's almost word for word.
+**That a Model B issues as CSM-1009 says is an assumption.** HR-0030 is followed where it
+says something else (R12, 054, 024 and the conditional branches).
+
+Each rule below has its source: **B** HR-0030, **1S** HR-0808, **CD** CSM-1009, **derived**
+(follows from printed sequences), **guess** (the manuals are silent), **core** (a rule of this
+implementation, part 8.4). T is the clock period of the issue; "CP n" of an instruction is
+T + n.
+
+What is kept:
+
+| Name | Meaning |
+|---|---|
+| `SEQ` | the earliest issue the order of the program allows: T + 1 behind an instruction of one parcel, T + 2 behind one of two, behind a branch what part 8.3 gives |
+| `A_FREE` | the clock period in which the last instruction that holds the accumulator delivers to it |
+| `DP_EMPTY`, `DP_REG` | behind 025-027 and 065-067: T + 4, and the operand register. The store is made in `DP_EMPTY` + 1 |
+| `B_FREE` | T + 4 behind 055-057, T + 3 behind 054 |
+| `MA_ACC` | the clock period Local Memory accepts the last reference in: T + 4 behind 030-034, T + 11 behind 035-037 |
+| `ADD_CP` | the clock period in which an instruction that has issued has the adder |
+| `IN_FN` | the issue of the last function that reads (150-153, 170-173) |
+| the stack | part 8.3: `avail[a]`, the first clock period parcel a can issue in |
+
+An instruction issues in the first clock period T for which all of these hold:
+
+| # | Condition | For | Source |
+|---|---|---|---|
+| R1 | T >= `SEQ` | all | B: one parcel a clock period [B 27, 3-3] |
+| R2 | T >= `avail[P]`; with a second parcel, `avail[P+1]` <= T + 1 | all | B [B 75, 6-15]; the clock periods derived |
+| R3 | T >= `A_FREE` - k, k the class of the instruction | those that use the accumulator | CD [CD 157, 7-2]; the reading derived: it gives "shifts require 2 CPs" (B) and HR-0808's sentence on 040 |
+| R4 | T >= `DP_EMPTY` | 011, 015, 024-027, 051, 064-067 | CD; B for 024-027 and 064-067 [B 83, 6-23] |
+| R5 | T is not `DP_EMPTY` - 1 | 020-037, 060-067, 074-077, 120-137 | CD [CD 158, 7-3]; which clock period derived |
+| R6 | T >= `B_FREE` | 011, 015, 042-067, 160-177 | CD; B for 042, 043 [B 97, 6-37] |
+| R7 | T >= `MA_ACC` - 1 | 030-037 | B [B 87, 6-27]; the clock period derived |
+| R8 | T + 2 is not `ADD_CP` | 070-073, 100-117 | CD [CD 159, 7-4] |
+| R9 | T is not `IN_FN` + 1 | 074-077, 120-137 | CD [CD 238, 7-83] |
+| R10 | `avail[P + parcels]` <= T + 1: the parcel behind the branch is there | 070-137 | CD; the clock period a guess |
+| R11 | a conditional branch does not wait for the accumulator; what follows it, target or next instruction, issues no earlier than `A_FREE` + 2 | 100-137 | B: "Formation of the branch condition requires 1 CP after the accumulator has received the desired data. The issue of the next instruction is delayed until the branch criterion is available" [B 127, 6-67]. (CSM-1009 holds the branch itself.) |
+| R12 | nothing issues before T + 5 behind a flag test | behind 040-043 | B: "No other instruction can issue until CP 5" [B 95, 6-35] |
+| R13 | a conditional branch does not issue in the clock period behind the issue of 030-033, 035-037 or a function that reads | 100-137 | core |
+
+The class k of R3 (the clock periods from the issue in which the accumulator must be free)
+and the clock period r in which the instruction delivers to it (`A_FREE` = T + r):
+
+| Instructions | k | r | Holds besides |
+|---|---|---|---|
+| 000-003 | - | - | |
+| 004-007, 044-047 | 1 | 3 | |
+| 010, 050 | 0 | 1 | |
+| 011, 051 | 1 | 1 | |
+| 012, 013, 052, 053 | 1 | 3 | adder in CP 2 |
+| 014 | 1 | 2 | |
+| 015 | 2 | 2 | |
+| 016, 017 | 2 | 4 | adder in CP 3 |
+| 020, 021, 060, 061 | 1 | 2 | |
+| 022, 023, 062, 063 | 2 | 4 | adder in CP 3 |
+| 024, 064 | 1 | - | nothing: they read the accumulator in CP 2, and what writes it next delivers later (derived; CD prints "accumulator is free" in CP 2) |
+| 025, 065 | 2 | 4 | adder in CP 3; DP to T + 4 |
+| 026, 027, 066, 067 | 1 | 4 | adder in CP 3; DP to T + 4 |
+| 030, 031 | 2 | 7 | `MA_ACC` = T + 4 |
+| 032, 033 | 2 | 9 | adder in CP 8; `MA_ACC` = T + 4 |
+| 034 | 2 | 4 | `MA_ACC` = T + 4 |
+| 035-037 | 2 | 11 | adder in CP 8; `MA_ACC` = T + 11 |
+| 040-043 | 2 | 5 | R12 |
+| 054 | 0 | 2 | B to T + 3 (B: "CP 2 (Accumulator is available this CP.) CP 3 Enter B" [B 107, 6-47]; CD enters B in CP 1) |
+| 055 | 1 | 3 | adder in CP 2; B to T + 4 |
+| 056, 057 | 0 | 3 | adder in CP 2; B to T + 4 |
+| 070-137 | - | - | part 8.3 |
+| 140-147, 154-167, 174-177 | 1 | - | |
+| 150-153, 170-173 | 1 | 6 | `IN_FN` (the sequence is CSM-1009's; HR-0030 prints none) |
+
+014 to 017 have a k one more than CSM-1009's table, which counts from the clock period
+behind the read of k (derived).
+
+Two waits inside an instruction, which move everything behind them in it:
+
+- **DP = RP** (CD [CD 159, 7-4]). 022, 023, 030-037, 062, 063 and a branch by an operand
+  register read their register in CP 2. If that register is `DP_REG` and the store is still
+  to come, CP 2 waits for it: `DP_EMPTY` - T - 1 clock periods, which R5 and R3 leave to be 1
+  for all but the unconditional branches.
+- **The adder** (CD [CD 238, 7-83]). A branch by an operand register wants it in CP 3 and waits
+  a clock period if `ADD_CP` is that one.
+
+A late k parcel is not a wait inside the instruction here: R2 holds the issue instead, which
+ends in the same clock period (HR-0030 lets CP 2 slip, CSM-1009 holds the issue).
+
+What this gives for some sequences, as clock periods of issue (`tools/crates/ios/src/tests.rs`,
+`issue_times` and `branch_times`, hold the model to them):
+
+| Sequence | Issues |
+|---|---|
+| `A = dd1`, `A = A + dd2`, `dd3 = A`, `A = dd4` | 0, 1, 4, 5 |
+| three circular shifts and a PASS | 0, 2, 4, 5 |
+| a run of `dd = dd + 1` on different registers | 0, 4, 8 |
+| `A = (dd)`, PASS, PASS, `A = A + 1` | 0, 1, 2, 6 |
+| a flag test, PASS | 0, 5 |
+| read the clock, store, read the clock | 0, 5, 6 |
+| the loop `A = A - 1`, PASS, `P = P - 2, A # 0` | 7 a turn |
+| the loop `dd = dd - 1`, `P = P - 1, A # 0` | 7 a turn (the branch gives the adder way: R8) |
+
+### 8.3 The instruction stack
+
+HR-0030 has the stack and two bounds: 32 parcels in two banks of 16, filled "in bursts of 4
+parcels; each burst references a storage address that is a multiple of 4 ... If no memory
+conflicts exist, 1 parcel each clock period issues from Local Memory" [B 27, 3-3]; a branch by
+P and d of at most 11 octal forward or 13 octal back never leaves it, a longer one "may", and
+"If the stack is being filled for the first time after an out-of-stack condition, a backward
+relative branch is only valid to location 0 of the stack" [B 29, 3-5]. The mechanism is in
+HR-0808: "Normally, two internal fetches are performed to keep the load point of the stack
+minimally 10₈ locations ahead of the next instruction to issue ... Once the condition
+L-S >= 10₈ is satisfied, internal fetches are stopped", "Forward relative branches into the
+area of the stack which has been or will be satisfied by predetermined internal fetches will
+be in-stack", "a reverse jump of 23₈ parcels is guaranteed" [1S 235, Part 3 3-5].
+
+With L the address of the last parcel read or asked for and S that of the instruction that
+issues next:
+
+| # | Rule | Source |
+|---|---|---|
+| S1 | While the stack is being filled, a burst begins when L - S < 8 and L + 1 is a multiple of 4; a burst goes on to the next multiple of 4. One parcel is read in a clock period. | 1S for the condition; B for the bursts and the rate |
+| S2 | A parcel can issue 4 clock periods after the one it is read in. | derived from "can issue at CP 5" with the fetch request in CP 4 [B 119, 6-59]: request, memory request, acceptance, data to II, decode, issue |
+| S3 | The stack holds the last 32 parcels read, and none from before the address it was last filled from. | B, 1S |
+| S4 | A taken branch by P and d is in the stack if its target is one of those, or one of the parcels the stack would go on to read by S1 if the instruction behind the branch were next (the rest of the burst under way and the bursts that bring L 8 ahead of it: the "predetermined internal fetches"), and is not one of the oldest parcels, whose places those take. The next issue is at T + 5, or when the target can issue if that is later. | 1S ("has been or will be satisfied"); 5 from B. HR-0808 has 4 in its own numbering |
+| S5 | Any other taken branch fills the stack again from its target: fetch request in CP 4, the first parcel read in CP 5 and issuing in CP 9, the parcels behind it one a clock period. For a branch by an operand register CP 4 is the clock period P is loaded in, which the two waits of part 8.2 can move. | B [B 119, 6-59] [B 123, 6-63]. 9 is the floor the listing gives; the times of an operand reference would make it 11 |
+| S6 | EXIT fills the stack again with the fetch request in CP 2, where P is loaded: next issue at T + 7. | guess: the listing ends at "CP 2 Transmit exit stack data to P register" [B 64, 6-4] |
+| S7 | An interrupt is taken in the clock period the next instruction would issue in (in any clock period while Master Clear holds the processor) and fills the stack like a return jump by a register: the handler issues 9 clock periods behind it. | guess: no manual gives a time |
+| S8 | A fetch under way is given up when the stack is filled again; it does not hold up the new request. | core (HR-0030's "can be delayed m CPs due to a previous internal fetch request" taken as m = 0) |
+
+The numbers the manuals guarantee follow: a branch of one parcel reaches 9 parcels forward (11
+octal) at least, since the parcels to come bring L to 8 ahead of P + 1 or more, and 12 at
+most; and 19 back (23 octal) once the stack is full, since L is then at most 11 ahead of
+P + 1. HR-0030's 13 octal back is less than that.
+
+### 8.4 Rules of this implementation
+
+Four things are not the manuals':
+
+1. **One port into Local Memory.** The processor reads an operand in the clock period of the
+   issue and stores a result two behind it (the manual has the requests in CP 3 and CP 10, and
+   four sections of memory that can each take a reference at a time [B 22, 2-2]). In those
+   clock periods no parcel is read for the stack: the fill slips a clock period. This stands
+   in for the manual's memory conflicts, which are not modelled otherwise. The port goes to
+   the operand in the clock period the instruction can issue in even if an interrupt or a
+   channel's store takes that clock period from it; the stack is filled again then anyway.
+2. **Stores are seen.** An instruction that issues is what Local Memory holds then (part 11,
+   Q13). So a store of the processor (034-037) into a parcel the stack holds, or into the one
+   it reads next, fills the stack again from the instruction behind the store, with the fetch
+   request in CP 2: next issue at T + 7. A channel's store into such a parcel fills it again
+   from P, with the fetch request in the clock period of the store, and nothing issues in
+   that clock period. (In the core that clock period is the one behind the channel's write:
+   the processor is told of the write from registers. What issues in the clock period of
+   the write itself is the parcel Local Memory held until then.) The real stack is a copy
+   and very likely kept the old parcel; no manual says. The model counts both kinds of
+   store: while the kernel boots, COS 1.17 starts and a job runs (`tests/sys/cos.script`,
+   1.75 and 1.72 thousand million instructions on the two processors) there is not one, so
+   for this software the choice changes nothing.
+3. **R13.** The hardware description has the word of 030-033, 035-037 and of a function that
+   reads in the accumulator a clock period behind the issue. Every instruction that uses the
+   accumulator comes later than that by R3; a conditional branch, which by R11 does not wait,
+   is held the one clock period.
+4. **R2 and R10 are also what the hardware description needs in front of the issue**: the
+   instruction and the operand register it names are taken from the stack and the registers
+   in the two clock periods between a parcel's arrival and the first one it can issue in, and
+   what the rules ask of the instruction is worked out then; its second parcel is read from
+   the stack as it issues. Whether a branch by P and d stays in the stack, and whether a
+   store of the processor went into it, is acted on a clock period behind the issue, in which
+   nothing can issue that would tell the difference.
+
+Not modelled: the busy time of a memory section (4 clock periods a reference, 6 for a channel's
+write [B 21, 2-1]); the "extra internal fetch" HR-0808 says sometimes keeps a forward branch
+of up to 17 octal in the stack beyond S4, "impossible to predict"; functions 6 and 7 taking
+effect 3 clock periods late [B 60, 5-20]; the 5 clock periods the exit stack wants behind a
+`PXS` function [B 51, 5-11].
+
+### 8.5 What is open
+
+In order of effect on measured time:
+
+1. **Whether CSM-1009's conditions hold for a Model B.** Two Cray texts give the time of a run
+   of instructions, and both are the plain sum of the result times: reading the clock, storing
+   it and reading it again "adds 8 CPs (4 clock counts) to the measured sequence" [B 52, 5-12]
+   (6 by the rules above), and the DD-39 driver has `A = 2`, `dd = A + dd` under the comment
+   ".Delay 6 C.P.'s" (TR-OVERLAYS, NDD39.317; 3 by the rules). The advice on three shifts, the
+   DP register and HR-0808's sentence on 040 only make sense with overlap. The first may be a
+   writer's sum carried from manual to manual since 1981, the second a programmer's lower
+   bound. A measurement on a real I/O Subsystem would settle it; the documents do not.
+2. The floor of a branch that fills the stack again: 9 or 11 (S5).
+3. EXIT and the interrupt sequence (S6, S7).
+4. A late criterion on a taken conditional branch: R11 as HR-0030 words it, with the next
+   issue held to `A_FREE` + 2. CSM-1009 holds the branch instead, which lets what follows a
+   branch that is not taken issue earlier.
+5. The in-stack branch: 5 clock periods (HR-0030, CSM-1009) or 4 (HR-0808).
+6. The sequences of 140-177 on a Model B: only CSM-1009 prints them; T0201D has "input to
+   accumulator takes 4-6 CP".
+7. Whether 024 and 064 hold the accumulator to CP 2.
+8. A store into a parcel the stack holds (part 8.4).
+
+### 8.6 The real-time clock in the software
 
 The kernel's channel 4 handler clears Done and counts milliseconds; every 100th interrupt it
 activates the clock demon and resets the count [kern 2378-238D] [SM 81, 2-49]. The demon,
@@ -689,7 +904,7 @@ long time-outs, and it must be the same in every IOP.
 RTC : 10 occurs once in the kernel [kern 35B8]. The 1981 workbook gives the counter value as
 the time stamp of trace entries [T 322, 18.2]. Nothing found depends on the value.
 
-### 8.3 Code in the IOS software that depends on instruction time
+### 8.7 Code in the IOS software that depends on instruction time
 
 Found by a linear sweep of `iop_kern.bin` and `iop_overlay1.bin` for short backward loops
 that only count, and for counted loops around a Busy or Done test. The sweep cannot tell code
@@ -698,8 +913,8 @@ from data, so the overlay counts are approximate.
 | What | Where | Count | Depends on |
 |---|---|---|---|
 | Hold Master Clear and deadstart bits on another IOP | [kern 4935-493A] | 8 iterations of 4 instructions | at least 200 ns [B 57, 5-17] |
-| Wait for the other IOP's dead start load before restoring Buffer Memory | [kern 493D-4941] | 40,000 iterations of `A = A - 1`, `PASS`, `P = P - 2, A # 0` | about 10 CP each, 5 ms, against a load of about 2 ms [B 211, B-3] |
-| Wait for Peripheral Expander (channel 17) Busy to clear. In the kernel's own tape reader a time-out aborts the dead start; in the expander interrupt handler it abandons the request; in overlays it reports a channel time-out. | [kern 48B3-48B8, 48BC-48C1, 36D2-36D7]; about 15 more in overlays | 400 iterations of 5 instructions | about 18 CP each, 90 µs (derived) |
+| Wait for the other IOP's dead start load before restoring Buffer Memory | [kern 493D-4941] | 40,000 iterations of `A = A - 1`, `PASS`, `P = P - 2, A # 0` | 7 CP each by part 8.2 (9 as the sum of the result times), 3.5 ms, against a load of about 2 ms [B 211, B-3] |
+| Wait for Peripheral Expander (channel 17) Busy to clear. In the kernel's own tape reader a time-out aborts the dead start; in the expander interrupt handler it abandons the request; in overlays it reports a channel time-out. | [kern 48B3-48B8, 48BC-48C1, 36D2-36D7]; about 15 more in overlays | 400 iterations of 5 instructions | 14 CP each by part 8.2 (the flag test alone holds 5), 70 µs |
 | Wait for Buffer Memory channel Busy to clear in the dump path | [kern 3F8C-3F92] | 65,535 iterations of 4 instructions | |
 | Waits on Done of a channel selected by B | overlays, about 20 sites | 4,096 or 65,536 iterations (A starts at 4096 or at 0) | |
 | Master Clear pulse to the mainframe on the output channel (function 4) | `MFINIT.asm:96-103, 177-181`, `START0.asm:125-128` in the overlay disassemblies | 10,000, 1,536 and 4,096 iterations | minimum pulse width only |
@@ -732,7 +947,7 @@ Tantos wrote in 2013 that the simulation "is not cycle-accurate ... so far I hav
 code that would rely on timing" [AT the-matrix.md:211]; the items above are what turned up
 afterwards.
 
-### 8.4 What cray-sim does about time (*sim only*)
+### 8.8 What cray-sim does about time (*sim only*)
 
 | Item | Behaviour | Source |
 |---|---|---|
@@ -806,7 +1021,7 @@ address 0 and started; it asks which file holds the Kernel and loads it [OG 26-2
    off the channel 5 enable that dead start set and clears its Done flag.
 7. Run the Local Memory test if the OR[511] value saved in step 2 was zero [kern 424F-4254].
    Whether a nonzero value has other effects was not traced. cray-sim leaves the register zero
-   and patches the test routine instead (part 8.4).
+   and patches the test routine instead (part 8.8).
 8. Much later, enable channel 2, clear and enable channel 3, enable channel 4
    [kern 4A72-4A75], and only after that execute the first `I = 1`.
 
@@ -859,9 +1074,9 @@ traced; in cray-sim it is already there (part 9.4).
 | 5 | Circular left shift by 18 to 31 | Not stated | Low bits filled with zeros [sim cray_iop.cpp:745-751] | Old Verilog has the same defect [V iop_inst_exec.v:391]. Not used with fixed counts in the kernel. |
 | 6 | PFR : 10 | Also clears the PFR flag [B 50, 5-10] | Returns the register, flag unchanged [sim cray_iop_built_in_channels.cpp:44-45] | Unused by the kernel. |
 | 7 | PFR flag on a conditional absolute branch that is not taken | Not stated | Not set [sim cray_iop.cpp:1027-1031] | Unused by the kernel. |
-| 8 | Interrupt point | After every instruction [B 59, 5-19] | Once per burst of up to 100 instructions | Part 8.4. |
+| 8 | Interrupt point | After every instruction [B 59, 5-19] | Once per burst of up to 100 instructions | Part 8.8. |
 | 9 | Skip after 002; re-enable inside the handler | Hardware quirks [B 65, 6-5] [B 59, 5-19] | First absent, second present | Part 7.3. |
-| 10 | Real-time clock | 17-bit counter of clock periods, wraps at 79,999 | Host wall clock, no wrap | Part 8.4. |
+| 10 | Real-time clock | 17-bit counter of clock periods, wraps at 79,999 | Host wall clock, no wrap | Part 8.8. |
 | 11 | E and the stack at Master Clear | XS[0] cleared; E advanced by the dead start interrupt [B 51, 5-11] | E and all 16 entries cleared, then E = 1 | The kernel sets E and clears entries 1 to 15 itself. |
 | 12 | Channel with no device | Not stated | Flag tests by B give 0; functions 0 and 6 ignored; anything else is an error or stops the simulator | The kernel sends functions 6 and 0 to all channels 3 to 39. |
 | 13 | Number of channels | 40, numbered 0 to 47 [B 41, 5-1] | 42, numbered 0 to 51 [cfg 84] | Model C documents say 42 [IA 68, 3-2]; the kernel accepts interrupt numbers below 42. |
@@ -890,9 +1105,9 @@ does not. Rows 4 and 5 are not reached by shifts with a fixed count.
 | 10 | Do functions 10 to 13 clear C? | Yes. | [IA 78, 3-12] [T 76, 4.8] [CD 37, 2-16]; cray-sim |
 | 11 | Reset value of E, of XS[1..15], of the operand registers, A, B, C | Not specified; the kernel does not depend on any of them. Use the values in part 2.3. | [B 51, 5-11]; [kern 41E4-4208] |
 | 12 | Channel interrupt enables after Master Clear | Channels 1 to 4 cleared; channel 5 set by dead start. The kernel needs channel 1 cleared and clears 3 to 39 itself. | [B 55, 5-15]; cray-sim; [kern 4246-424E] |
-| 13 | Self-modifying code and the 32-parcel instruction stack: does a store to a parcel already in the stack take effect? | The manuals do not say. cray-sim has no instruction stack, always fetches from memory, and boots the system, so always fetching from memory is sufficient. | [B 27-29, 3-3 to 3-5]; [sim cray_iop.cpp:854-856] |
-| 14 | Instruction rate of the real machine | 10 to 20 million per second, derived from the per-instruction clock periods. | part 8.1 |
-| 15 | Exact clock period at which an interrupt is recognised, and the "2-instruction window" | Model it at instruction boundaries. | [B 59, 5-19] |
+| 13 | Self-modifying code and the 32-parcel instruction stack: does a store to a parcel already in the stack take effect? | The manuals do not say (for the mainframe's instruction buffers HR-0808 says the modified instruction is not loaded [1S 69, Part 2 3-4]). cray-sim has no instruction stack, always fetches from memory, and boots the system. Here the store is seen, and the stack is filled again (part 8.4). | [B 27-29, 3-3 to 3-5]; [sim cray_iop.cpp:854-856] |
+| 14 | Instruction rate of the real machine | 18 to 25 million per second for the kernel, by the rules of part 8.2. | part 8.1 |
+| 15 | Exact clock period at which an interrupt is recognised, and the "2-instruction window" | Taken in the clock period the next instruction would issue in (part 8.3, S7). | [B 59, 5-19] |
 | 16 | Does anything in the overlays (as opposed to the kernel) use PFR, shift counts above 17 or the boundary interrupt? | Not checked instruction by instruction. The training manual says the operating system does not use PFR or stack restructuring. A trace counter for each in the reference model would settle it during the first boot. | [IA 76, 3-10] [IA 78, 3-12] |
 
 ---
