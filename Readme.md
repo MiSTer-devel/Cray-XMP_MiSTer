@@ -9,6 +9,23 @@ station (**F2**) and submit batch jobs. You can also work with COS directly at
 the station: write a program in its text editor, assemble or compile it and
 run it. If the OS ever asks for a year make sure it is before 2000.
 
+## Features
+
+- One CRAY X-MP processor at the real 9.5 ns clock, with four million words of memory
+- Vector registers and units, with gather and scatter
+- The X-MP's three memory ports
+- Instruction timing from Cray's manual, apart from memory
+  ([differences](docs/MACHINE.md#differences-from-a-real-x-mp))
+- Floating-point multiply and reciprocal that match Cray's own simulation bit for bit
+- The I/O Subsystem with two I/O Processors, running Cray's software
+  ([details](docs/MACHINE.md#the-io-subsystem))
+- Operator's console and station as Ampex Dialogue 80 terminals
+- Disk drives, a tape drive and a printer, from files on the SD card
+- Device times: fast, or those of the real devices
+- COS 1.17 installed, with an assembler, FORTRAN 77, LISP and a text editor
+- 15 kHz or 31 kHz picture, in white, green, amber or cyan
+- The station on the MiSTer's serial port
+
 ## What you need
 
 - A [MiSTer](https://mister-devel.github.io/MkDocs_MiSTer/) with a keyboard. No SDRAM module is needed.
