@@ -14,6 +14,8 @@ module t_regfile_hard (
 	clk,
 	i_jk_addr,
 	o_jk_data,
+	i_mem_addr,
+	o_mem_data,
 	i_wr_addr,
 	i_wr_data,
 	i_wr_en
@@ -27,6 +29,8 @@ module t_regfile_hard (
 	input wire clk;
 	input wire [LOGDEPTH-1:0] i_jk_addr;
 	output wire [WIDTH-1:0] o_jk_data;
+	input wire [LOGDEPTH-1:0] i_mem_addr;  //the register a block transfer asks for,
+	output reg [WIDTH-1:0] o_mem_data;  //read from a copy of its own: there in the next clock
 	input wire [LOGDEPTH-1:0] i_wr_addr;
 	input wire [WIDTH-1:0] i_wr_data;
 	input wire i_wr_en;
@@ -41,6 +45,19 @@ module t_regfile_hard (
 
 	//read registers
 	assign o_jk_data = data[i_jk_addr];
+
+	//A block transfer reads the registers by an address of its own.  It gets a
+	//second copy of them to read, so that neither address stands in the way of
+	//the other: the instruction's leads on into the S registers, the
+	//transfer's comes out of its sequencing.  The transfer asks a clock ahead
+	//and wants the word in the next clock, so this copy is a block of memory
+	//read with the clock: what it gives is what the register held in the
+	//clock it was asked, a write of that clock not yet in it.
+	(* ramstyle = "M10K" *) reg [WIDTH-1:0] copy[DEPTH-1:0];
+	always @(posedge clk) begin
+		if (i_wr_en) copy[i_wr_addr] <= i_wr_data;
+		o_mem_data <= copy[i_mem_addr];
+	end
 
 
 endmodule

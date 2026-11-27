@@ -5,16 +5,18 @@
 //! The other implementation is given the same Local Memory and, at every
 //! step, what this one's channels answered: the channel that asks for an
 //! interrupt, the value a function read, the flag a test found.  It must
-//! then take the same interrupts, send the same functions and end every
-//! step with the same registers, in the same number of clock periods.  What
-//! a device stores in Local Memory by itself is in the record too.
+//! then take the same interrupts, send the same functions, have the same
+//! registers behind every step, and issue every step the same number of
+//! clock periods behind the one before.  What a device stores in Local
+//! Memory by itself is in the record too, and whether that changed a
+//! parcel the instruction stack held.
 //!
 //! The real-time clock, channel 4, is one of the channels outside the
 //! processor here: the hardware keeps it with the other channels.
 //!
 //! # Format
 //!
-//! Records of 20 bytes, numbers little-endian:
+//! Records of 24 bytes, numbers little-endian:
 //!
 //! ```text
 //! byte 0      kind: 0 instruction, 1 interrupt, 2 a parcel of Local Memory to set,
@@ -23,24 +25,29 @@
 //!             8 an operand register to set, 9 the accumulator (number), B (value
 //!             bits 8 to 0) and the carry (value bit 15) to set, 10 a number of
 //!             clocks in which no channel asks and no step may end
-//! byte 1      the channel (4 to 47 octal) asking for an interrupt before the step, or 0
+//! byte 1      the channel (4 to 47 octal) asking for an interrupt in the clock
+//!             period the step issues in and those it waits before, or 0
 //! bytes 2-3   P before the step; for kinds 2, 4, 5 and 6 the address or number
 //! bytes 4-5   the parcel at P; for kinds 2, 4, 5 and 6 the value
 //! bytes 6-7   the channel number of a function or a flag test (9 bits)
 //! bytes 8-9   the accumulator before the step
 //! bytes 10-11 the value read by a function 10 to 13, or the flag found by 040 to 043
 //! bytes 12-17 P, the accumulator and B after the step
-//! byte 18     bits 3 to 0: E after the step; bits 7 to 4: the clock periods of
-//!             the step (1 to 13)
+//! byte 18     bits 3 to 0: E after the step; bit 7: before the step a device had
+//!             changed a parcel the instruction stack held, the one at the address
+//!             in bytes 22-23, and the stack is filled again
 //! byte 19     after the step: bit 0 carry, 1 System Interrupt Enable, 2 its delayed
 //!             setting pending, 3 Program Fetch Request flag, 4 Exit Stack Boundary
 //!             flag, 5 held by Master Clear
+//! bytes 20-21 the clock periods from the issue of the step before to the issue of
+//!             this one; 1 for the first step behind a Master Clear
+//! bytes 22-23 see byte 18
 //! ```
 
 use crate::iop::{channel, Channels, Iop, EXIT_STACK, MEMORY_PARCELS, OPERAND_REGISTERS};
 use std::io::Write;
 
-pub const RECORD_BYTES: usize = 20;
+pub const RECORD_BYTES: usize = 24;
 
 const INSTRUCTION: u8 = 0;
 const INTERRUPT: u8 = 1;
@@ -103,7 +110,8 @@ impl Recorder {
         }
     }
 
-    /// One step of `iop`, recorded.  Returns its clock periods.
+    /// One step of `iop`, recorded.  Returns its clock periods: those from
+    /// the issue before to its own.
     pub fn step(&mut self, iop: &mut Iop, channels: &mut dyn Channels) -> u32 {
         let (p, a) = (iop.p(), iop.a());
         let parcel = iop.memory()[p as usize];
@@ -117,14 +125,10 @@ impl Recorder {
         };
         // a store of the instruction itself, which the reader does too
         let stores = matches!(f, 0o034..=0o037).then(|| iop.operand(d as usize));
-        let clock = iop.done(channel::RTC) && iop.enabled(channel::RTC);
-        let request = if clock {
-            channel::RTC as u8
-        } else {
-            channels.interrupt().unwrap_or(0)
-        };
         let before = iop.counters();
         let clock_periods = iop.step(channels);
+        // the channel that asked in the clock period of the issue
+        let request = iop.asked_by().unwrap_or(0);
         let interrupt = iop.counters().interrupts != before.interrupts;
         let value = match f {
             _ if interrupt => 0,
@@ -141,8 +145,9 @@ impl Recorder {
         {
             record[2 + 2 * n..4 + 2 * n].copy_from_slice(&field.to_le_bytes());
         }
-        debug_assert!((1..16).contains(&clock_periods));
-        record[18] = iop.e() | (clock_periods as u8) << 4;
+        record[18] = iop.e() | (iop.device_store().is_some() as u8) << 7;
+        record[20..22].copy_from_slice(&(clock_periods as u16).to_le_bytes());
+        record[22..24].copy_from_slice(&iop.device_store().unwrap_or(0).to_le_bytes());
         record[19] = iop.c() as u8
             | (iop.interrupt_enable() as u8) << 1
             | (iop.interrupt_enable_delayed() as u8) << 2
@@ -201,13 +206,24 @@ impl Random {
 struct RandomChannels {
     random: Random,
     request: Option<u8>,
+    /// Data that a function moves by itself goes below this address.
+    below: usize,
+    /// Any function may move data, and does so every third time: one to
+    /// four parcels.
+    often: bool,
 }
 
 impl Channels for RandomChannels {
     fn function(&mut self, mem: &mut [u16], _: u8, function: u8, _: u16) -> Option<u16> {
         // some functions move data by themselves
-        if function == 4 && self.random.below(4) == 0 {
-            let at = self.random.below(MEMORY_PARCELS as u64 - 8) as usize;
+        if self.often && self.random.below(3) == 0 {
+            let at = self.random.below(self.below as u64 - 4) as usize;
+            let parcels = 1 + self.random.below(4) as usize;
+            for parcel in mem[at..at + parcels].iter_mut() {
+                *parcel = self.random.next() as u16;
+            }
+        } else if function == 4 && self.random.below(4) == 0 {
+            let at = self.random.below(self.below as u64 - 8) as usize;
             for parcel in mem[at..at + 8].iter_mut() {
                 *parcel = self.random.next() as u16;
             }
@@ -236,17 +252,67 @@ pub enum Mix {
     /// Mostly operations on the registers and memory, some branches, a few
     /// functions; interrupts are let in more often.
     Work,
+    /// A program that stays in the first 256 parcels of memory, for the
+    /// instruction stack: many branches of up to 45 parcels either way,
+    /// loops, instructions of two parcels wherever they fall, and stores,
+    /// the program's and the channels', into the parcels of the program.
+    Loops,
 }
 
+/// Where a program of the third kind stays.
+const LOOPS: usize = 256;
+
 /// A random program on random channels, `steps` steps of it, recorded.
-/// The same seed gives the same record.
-pub fn random(seed: u64, steps: u64, mix: Mix, out: Box<dyn Write>) {
+/// The same seed gives the same record.  Returns the processor's counts.
+pub fn random(seed: u64, steps: u64, mix: Mix, out: Box<dyn Write>) -> crate::iop::Counters {
     let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     let mut iop = Iop::new();
-    for parcel in iop.memory_mut().iter_mut() {
+    for (address, parcel) in iop.memory_mut().iter_mut().enumerate() {
         let noise = random.next() as u16;
         *parcel = match mix {
             Mix::Noise => noise,
+            // outside its region: back in through a register that points there
+            Mix::Loops if address >= LOOPS => 0o074 << 9 | 0o20 | noise & 0o17,
+            Mix::Loops => {
+                let pointer = 0o20 | noise & 0o17;
+                let (f, d) = match random.below(32) {
+                    0 => (0o003, 0),
+                    1 => (0o001 + random.below(2) as u16, 0),
+                    // branches by P and d, half of them on a condition
+                    2..=9 => (
+                        match random.below(2) {
+                            0 => 0o070 + random.below(4) as u16,
+                            _ => 0o100 + random.below(0o20) as u16,
+                        },
+                        random.below(46) as u16,
+                    ),
+                    // by a register that points into the program
+                    10 | 11 => (
+                        match random.below(2) {
+                            0 => 0o074 + random.below(4) as u16,
+                            _ => 0o120 + random.below(0o20) as u16,
+                        },
+                        pointer,
+                    ),
+                    // functions, half of them for a channel outside
+                    12 | 13 => (
+                        0o140 + [0, 7, 0o10, 0o10, 0o11, 0o14, 0o15, 4][random.below(8) as usize],
+                        [5, 5, 6, 2, 1, 0][random.below(6) as usize],
+                    ),
+                    14 => (0o040 + random.below(2) as u16, noise % 6),
+                    // memory through a register that points into the program
+                    15..=18 => (0o030 + random.below(8) as u16, pointer),
+                    19..=21 => (0o014 + random.below(4) as u16, noise & 0o777),
+                    // the registers from 40 on are worked with; a PASS now and then
+                    22 => (0, 0),
+                    _ => (
+                        [0o004, 0o010, 0o020, 0o044, 0o050][random.below(5) as usize]
+                            + random.below(8) as u16,
+                        0o40 | noise & 0o37,
+                    ),
+                };
+                f << 9 | d
+            }
             Mix::Work => {
                 let f = match random.below(32) {
                     // I = 1 and a few instructions later an interrupt can come
@@ -284,7 +350,12 @@ pub fn random(seed: u64, steps: u64, mix: Mix, out: Box<dyn Write>) {
         // some of the registers a program of the second kind uses most are
         // zero: a branch through one sets the Program Fetch Request flag
         let zero = mix == Mix::Work && d < 0o40 && random.below(4) == 0;
-        iop.set_operand(d, if zero { 0 } else { random.next() as u16 });
+        let value = match mix {
+            Mix::Loops if (0o20..0o40).contains(&d) => random.below(LOOPS as u64),
+            _ if zero => 0,
+            _ => random.next(),
+        };
+        iop.set_operand(d, value as u16);
     }
     iop.set_a(random.next() as u16);
     iop.set_b(random.next() as u16);
@@ -302,6 +373,12 @@ pub fn random(seed: u64, steps: u64, mix: Mix, out: Box<dyn Write>) {
     let mut channels = RandomChannels {
         random: Random(seed ^ 0x5DEE_CE66_D1CE_4E5B | 1),
         request: Some(5),
+        below: if mix == Mix::Loops {
+            LOOPS
+        } else {
+            MEMORY_PARCELS
+        },
+        often: mix == Mix::Loops,
     };
     for step in 0..steps {
         // half way, a Master Clear and a second dead start: the registers
@@ -312,7 +389,7 @@ pub fn random(seed: u64, steps: u64, mix: Mix, out: Box<dyn Write>) {
             channels.request = Some(5);
         }
         recorder.step(&mut iop, &mut channels);
-        let often = if mix == Mix::Work { 3 } else { 8 };
+        let often = if mix == Mix::Noise { 8 } else { 3 };
         if channels.random.below(often) == 0 {
             channels.request = match channels.random.below(3) {
                 0 => None,
@@ -321,6 +398,7 @@ pub fn random(seed: u64, steps: u64, mix: Mix, out: Box<dyn Write>) {
         }
     }
     recorder.finish(&iop);
+    iop.counters()
 }
 
 /// A short program for what random programs seldom reach: both channels
@@ -355,6 +433,8 @@ pub fn directed(out: Box<dyn Write>) {
     let mut channels = RandomChannels {
         random: Random(1),
         request: Some(5),
+        below: MEMORY_PARCELS,
+        often: false,
     };
     let mut read = Vec::new();
     for _ in 0..14 {
@@ -407,13 +487,16 @@ mod tests {
         let kinds: Vec<u8> = record.chunks(RECORD_BYTES).map(|r| r[0]).collect();
         let count = |kind: u8| kinds.iter().filter(|&&k| k == kind).count();
         assert_eq!(count(INSTRUCTION) + count(INTERRUPT), 500);
-        // the first step is the dead start interrupt from channel 5: E is 1
-        // after it, and it took 9 clock periods
-        let first = record
-            .chunks(RECORD_BYTES)
-            .find(|r| r[0] <= INTERRUPT)
-            .unwrap();
-        assert_eq!((first[0], first[1], first[18]), (INTERRUPT, 5, 1 | 9 << 4));
+        // the first step is the dead start interrupt from channel 5, in the
+        // first clock period: E is 1 after it.  The first instruction issues
+        // 9 clock periods behind it.
+        let mut steps = record.chunks(RECORD_BYTES).filter(|r| r[0] <= INTERRUPT);
+        let first = steps.next().unwrap();
+        assert_eq!(
+            (first[0], first[1], first[18], first[20]),
+            (INTERRUPT, 5, 1, 1)
+        );
+        assert_eq!(steps.next().unwrap()[20], 9);
         assert_eq!((count(MASTER_CLEAR), count(IDLE)), (2, 2));
         assert!(
             count(INTERRUPT) > 1,

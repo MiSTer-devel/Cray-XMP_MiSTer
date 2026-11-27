@@ -1,0 +1,542 @@
+{
+ "columns": [
+  {
+   "label": "mister",
+   "rep": 1,
+   "kernels": {
+    "EMPTY": {
+     "cp": 13.003662109375,
+     "clocks": 53263,
+     "units": 4096,
+     "group": "scalar"
+    },
+    "SINT": {
+     "cp": 34.01220703125,
+     "clocks": 139314,
+     "units": 4096,
+     "group": "scalar"
+    },
+    "SFP": {
+     "cp": 56.003662109375,
+     "clocks": 229391,
+     "units": 4096,
+     "group": "scalar"
+    },
+    "BRANCH": {
+     "cp": 12.2548828125,
+     "clocks": 50196,
+     "units": 4096,
+     "group": "scalar"
+    },
+    "CALL3": {
+     "cp": 14.54736328125,
+     "clocks": 59586,
+     "units": 4096,
+     "group": "fetch"
+    },
+    "CALL8": {
+     "cp": 86.515380859375,
+     "clocks": 354367,
+     "units": 4096,
+     "group": "fetch"
+    },
+    "SLOAD": {
+     "cp": 23.092041015625,
+     "clocks": 94585,
+     "units": 4096,
+     "group": "smem"
+    },
+    "SSTORE": {
+     "cp": 14.003662109375,
+     "clocks": 57359,
+     "units": 4096,
+     "group": "smem"
+    },
+    "SCOPY": {
+     "cp": 46.232666015625,
+     "clocks": 189369,
+     "units": 4096,
+     "group": "smem"
+    },
+    "CHASE": {
+     "cp": 36.08984375,
+     "clocks": 147824,
+     "units": 4096,
+     "group": "smem"
+    },
+    "RECUR": {
+     "cp": 55.073974609375,
+     "clocks": 225583,
+     "units": 4096,
+     "group": "smem"
+    },
+    "SIEVE": {
+     "cp": 74.746337890625,
+     "clocks": 306161,
+     "units": 4096,
+     "group": "smem"
+    },
+    "SORT": {
+     "cp": 500.7734375,
+     "clocks": 128198,
+     "units": 256,
+     "group": "smem"
+    },
+    "VADD": {
+     "cp": 1.12884521484375,
+     "clocks": 36990,
+     "units": 32768,
+     "group": "vreg"
+    },
+    "VFP": {
+     "cp": 2.4300537109375,
+     "clocks": 39814,
+     "units": 16384,
+     "group": "vreg"
+    },
+    "VMIX": {
+     "cp": 4.57440185546875,
+     "clocks": 74947,
+     "units": 16384,
+     "group": "vreg"
+    },
+    "VLOAD": {
+     "cp": 1.381072998046875,
+     "clocks": 45255,
+     "units": 32768,
+     "group": "vmem"
+    },
+    "VSTORE": {
+     "cp": 1.314361572265625,
+     "clocks": 43069,
+     "units": 32768,
+     "group": "vmem"
+    },
+    "VCOPY": {
+     "cp": 3.89556884765625,
+     "clocks": 63825,
+     "units": 16384,
+     "group": "vmem"
+    },
+    "VSTRIDE": {
+     "cp": 3.448486328125,
+     "clocks": 14125,
+     "units": 4096,
+     "group": "vmem"
+    },
+    "GATHER": {
+     "cp": 6.465576171875,
+     "clocks": 105932,
+     "units": 16384,
+     "group": "vmem"
+    },
+    "SCATTER": {
+     "cp": 3.959228515625,
+     "clocks": 64868,
+     "units": 16384,
+     "group": "vmem"
+    },
+    "BLOCK": {
+     "cp": 2.87432861328125,
+     "clocks": 47093,
+     "units": 16384,
+     "group": "vmem"
+    },
+    "SAXPY": {
+     "cp": 3.89569091796875,
+     "clocks": 63827,
+     "units": 16384,
+     "group": "vfp"
+    },
+    "DOT": {
+     "cp": 2.7161865234375,
+     "clocks": 44502,
+     "units": 16384,
+     "group": "vfp"
+    },
+    "HYDRO": {
+     "cp": 6.219928075396825,
+     "clocks": 100315,
+     "units": 16128,
+     "group": "vfp"
+    }
+   },
+   "commit": "6cedd8f",
+   "changed": true,
+   "date": "2026-11-26 07:02",
+   "where": "sim",
+   "seed": 1
+  },
+  {
+   "label": "0",
+   "rep": 1,
+   "kernels": {
+    "EMPTY": {
+     "cp": 13.003662109375,
+     "clocks": 53263,
+     "units": 4096,
+     "group": "scalar"
+    },
+    "SINT": {
+     "cp": 34.006591796875,
+     "clocks": 139291,
+     "units": 4096,
+     "group": "scalar"
+    },
+    "SFP": {
+     "cp": 56.003662109375,
+     "clocks": 229391,
+     "units": 4096,
+     "group": "scalar"
+    },
+    "BRANCH": {
+     "cp": 12.2548828125,
+     "clocks": 50196,
+     "units": 4096,
+     "group": "scalar"
+    },
+    "CALL3": {
+     "cp": 14.52294921875,
+     "clocks": 59486,
+     "units": 4096,
+     "group": "fetch"
+    },
+    "CALL8": {
+     "cp": 48.7548828125,
+     "clocks": 199700,
+     "units": 4096,
+     "group": "fetch"
+    },
+    "SLOAD": {
+     "cp": 14.003662109375,
+     "clocks": 57359,
+     "units": 4096,
+     "group": "smem"
+    },
+    "SSTORE": {
+     "cp": 14.003662109375,
+     "clocks": 57359,
+     "units": 4096,
+     "group": "smem"
+    },
+    "SCOPY": {
+     "cp": 27.00439453125,
+     "clocks": 110610,
+     "units": 4096,
+     "group": "smem"
+    },
+    "CHASE": {
+     "cp": 21.004638671875,
+     "clocks": 86035,
+     "units": 4096,
+     "group": "smem"
+    },
+    "RECUR": {
+     "cp": 35.004638671875,
+     "clocks": 143379,
+     "units": 4096,
+     "group": "smem"
+    },
+    "SIEVE": {
+     "cp": 59.37939453125,
+     "clocks": 243218,
+     "units": 4096,
+     "group": "smem"
+    },
+    "SORT": {
+     "cp": 358.26171875,
+     "clocks": 91715,
+     "units": 256,
+     "group": "smem"
+    },
+    "VADD": {
+     "cp": 1.12884521484375,
+     "clocks": 36990,
+     "units": 32768,
+     "group": "vreg"
+    },
+    "VFP": {
+     "cp": 2.4300537109375,
+     "clocks": 39814,
+     "units": 16384,
+     "group": "vreg"
+    },
+    "VMIX": {
+     "cp": 4.57440185546875,
+     "clocks": 74947,
+     "units": 16384,
+     "group": "vreg"
+    },
+    "VLOAD": {
+     "cp": 1.141632080078125,
+     "clocks": 37409,
+     "units": 32768,
+     "group": "vmem"
+    },
+    "VSTORE": {
+     "cp": 1.096466064453125,
+     "clocks": 35929,
+     "units": 32768,
+     "group": "vmem"
+    },
+    "VCOPY": {
+     "cp": 3.236328125,
+     "clocks": 53024,
+     "units": 16384,
+     "group": "vmem"
+    },
+    "VSTRIDE": {
+     "cp": 3.11767578125,
+     "clocks": 12770,
+     "units": 4096,
+     "group": "vmem"
+    },
+    "GATHER": {
+     "cp": 6.1688232421875,
+     "clocks": 101070,
+     "units": 16384,
+     "group": "vmem"
+    },
+    "SCATTER": {
+     "cp": 3.5052490234375,
+     "clocks": 57430,
+     "units": 16384,
+     "group": "vmem"
+    },
+    "BLOCK": {
+     "cp": 2.205078125,
+     "clocks": 36128,
+     "units": 16384,
+     "group": "vmem"
+    },
+    "SAXPY": {
+     "cp": 3.236572265625,
+     "clocks": 53028,
+     "units": 16384,
+     "group": "vfp"
+    },
+    "DOT": {
+     "cp": 2.48199462890625,
+     "clocks": 40665,
+     "units": 16384,
+     "group": "vfp"
+    },
+    "HYDRO": {
+     "cp": 5.565166170634921,
+     "clocks": 89755,
+     "units": 16128,
+     "group": "vfp"
+    }
+   },
+   "commit": "6cedd8f",
+   "changed": true,
+   "date": "2026-11-26 07:02",
+   "where": "sim",
+   "seed": 1
+  },
+  {
+   "label": "hardware",
+   "rep": 300,
+   "trials": 5,
+   "where": "COS",
+   "kernels": {
+    "EMPTY": {
+     "cp": 13.00293212890625,
+     "clocks": 15978003,
+     "units": 4096,
+     "group": "scalar",
+     "spread": 0.004822129523946117
+    },
+    "SINT": {
+     "cp": 34.00804443359375,
+     "clocks": 41789085,
+     "units": 4096,
+     "group": "scalar",
+     "spread": 0.0018510096595798498
+    },
+    "SFP": {
+     "cp": 56.03655517578125,
+     "clocks": 68857719,
+     "units": 4096,
+     "group": "scalar",
+     "spread": 0.0011361398712612658
+    },
+    "BRANCH": {
+     "cp": 12.253179524739583,
+     "clocks": 15056707,
+     "units": 4096,
+     "group": "scalar",
+     "spread": 0.001955075568648601
+    },
+    "CALL3": {
+     "cp": 14.503074544270833,
+     "clocks": 17821378,
+     "units": 4096,
+     "group": "fetch",
+     "spread": 0.00294107447807912
+    },
+    "CALL8": {
+     "cp": 56.36925374348959,
+     "clocks": 69266539,
+     "units": 4096,
+     "group": "fetch",
+     "spread": 0.002571126009341951
+    },
+    "SLOAD": {
+     "cp": 22.44904541015625,
+     "clocks": 27585387,
+     "units": 4096,
+     "group": "smem",
+     "spread": 0.0024593455948251908
+    },
+    "SSTORE": {
+     "cp": 14.00293212890625,
+     "clocks": 17206803,
+     "units": 4096,
+     "group": "smem",
+     "spread": 0.0007254688741424875
+    },
+    "SCOPY": {
+     "cp": 48.56340087890625,
+     "clocks": 59674707,
+     "units": 4096,
+     "group": "smem",
+     "spread": 0.002428164414782996
+    },
+    "CHASE": {
+     "cp": 36.982808430989586,
+     "clocks": 45444475,
+     "units": 4096,
+     "group": "smem",
+     "spread": 0.0027348319020079614
+    },
+    "RECUR": {
+     "cp": 52.2047265625,
+     "clocks": 64149168,
+     "units": 4096,
+     "group": "smem",
+     "spread": 0.002367466402682039
+    },
+    "SIEVE": {
+     "cp": 74.52279703776041,
+     "clocks": 91573613,
+     "units": 4096,
+     "group": "smem",
+     "spread": 0.0008484649393487587
+    },
+    "SORT": {
+     "cp": 488.90221354166664,
+     "clocks": 37547690,
+     "units": 256,
+     "group": "smem",
+     "spread": 0.002961327314676243
+    },
+    "VADD": {
+     "cp": 1.1250049845377603,
+     "clocks": 11059249,
+     "units": 32768,
+     "group": "vreg",
+     "spread": 0.0030047248235391955
+    },
+    "VFP": {
+     "cp": 2.421886189778646,
+     "clocks": 11904055,
+     "units": 16384,
+     "group": "vreg",
+     "spread": 0.004356834708844959
+    },
+    "VMIX": {
+     "cp": 4.563189697265625,
+     "clocks": 22428990,
+     "units": 16384,
+     "group": "vreg",
+     "spread": 0.0023266763238112276
+    },
+    "VLOAD": {
+     "cp": 1.3685069783528645,
+     "clocks": 13452971,
+     "units": 32768,
+     "group": "vmem",
+     "spread": 0.00784205957182249
+    },
+    "VSTORE": {
+     "cp": 1.3237355550130208,
+     "clocks": 13012850,
+     "units": 32768,
+     "group": "vmem",
+     "spread": 0.04930549418459451
+    },
+    "VCOPY": {
+     "cp": 3.0949080403645834,
+     "clocks": 15212092,
+     "units": 16384,
+     "group": "vmem",
+     "spread": 0.018758366699333617
+    },
+    "VSTRIDE": {
+     "cp": 3.4294783528645834,
+     "clocks": 4214143,
+     "units": 4096,
+     "group": "vmem",
+     "spread": 0.0090089491505152
+    },
+    "GATHER": {
+     "cp": 6.4645538330078125,
+     "clocks": 31774575,
+     "units": 16384,
+     "group": "vmem",
+     "spread": 0.0023305425800344004
+    },
+    "SCATTER": {
+     "cp": 3.041908162434896,
+     "clocks": 14951587,
+     "units": 16384,
+     "group": "vmem",
+     "spread": 0.025722286202795708
+    },
+    "BLOCK": {
+     "cp": 2.8384918212890624,
+     "clocks": 13951755,
+     "units": 16384,
+     "group": "vmem",
+     "spread": 0.00389513720675283
+    },
+    "SAXPY": {
+     "cp": 2.684864501953125,
+     "clocks": 13196646,
+     "units": 16384,
+     "group": "vfp",
+     "spread": 0.0588413146795026
+    },
+    "DOT": {
+     "cp": 2.768690388997396,
+     "clocks": 13608667,
+     "units": 16384,
+     "group": "vfp",
+     "spread": 0.005712682954179149
+    },
+    "HYDRO": {
+     "cp": 5.0625553902116405,
+     "clocks": 24494668,
+     "units": 16128,
+     "group": "vfp",
+     "spread": 0.002179943814710983
+    },
+    "CAL": {
+     "cp": 1002740.0759902991,
+     "clocks": 1240389474,
+     "units": 1237,
+     "group": "cos"
+    },
+    "LDR": {
+     "cp": 317312.6831042846,
+     "clocks": 392515789,
+     "units": 1237,
+     "group": "cos"
+    }
+   },
+   "date": "2026-11-26 06:24",
+   "core": "the build of 26 November 2026 (seed 1)"
+  }
+ ]
+}

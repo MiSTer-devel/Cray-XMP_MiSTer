@@ -25,7 +25,7 @@ module emu
 
 assign ADC_BUS  = 'Z;
 assign USER_OUT = '1;
-assign {UART_RTS, UART_DTR} = 0;
+assign UART_DTR = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 assign {SDRAM_DQ, SDRAM_A, SDRAM_BA, SDRAM_CLK, SDRAM_CKE, SDRAM_DQML, SDRAM_DQMH, SDRAM_nWE, SDRAM_nCAS, SDRAM_nRAS, SDRAM_nCS} = 'Z;
 
@@ -58,14 +58,14 @@ localparam CONF_STR = {
 	"-;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"O[6:5],Scale,Normal,V-Integer,Narrower HV-Integer,Wider HV-Integer;",
-	"O[9:7],Scandoubler Fx,None,HQ2x,CRT 25%,CRT 50%,CRT 75%;",
 	"O[4:3],Text color,White,Green,Amber,Cyan;",
-	"O[14],Font,8x8 (15kHz),8x16 (31kHz);",
+	"D0O[14],Font,8x8 (15kHz),8x16 (31kHz);",
 	"O[15],Device times,Fast,Real;",
+	"UART9600;",
 	"-;",
 	"T[0],Reset;",
 	"R[0],Reset and close OSD;",
-	"v,1;", // [optional] config version 0-99. 
+	"v,2;", // [optional] config version 0-99. 
 	        // If CONF_STR options are changed in incompatible way, then change version number too,
 			  // so all options will get default values on first start.
 	"V,v",`BUILD_DATE 
@@ -87,7 +87,7 @@ hps_io #(.CONF_STR(CONF_STR), .VDNUM(4), .BLKSZ(2)) hps_io
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask(16'd0),
+	.status_menumask({15'd0, forced_scandoubler}),
 	
 	.ps2_key(ps2_key),
 
@@ -183,14 +183,6 @@ pll_ios pll_ios
 	.locked()
 );
 
-wire uart_break, uart_break_cpu;
-cdc_bit sync_break
-(
-	.clk(clk_cpu),
-	.d(uart_break),
-	.q(uart_break_cpu)
-);
-
 reg host_reset_ios;
 wire host_reset;
 always @(posedge clk_ios) host_reset_ios <= RESET | status[0] | buttons[1] | ioctl_download;
@@ -201,12 +193,11 @@ cdc_bit sync_host_reset
 	.q(host_reset)
 );
 
-reg reset_cpu, uart_reset_cpu;
+reg reset_cpu;
 reg [15:0] reset_cnt;
 
 always @(posedge clk_cpu) begin
-	uart_reset_cpu <= host_reset;
-	if(host_reset | uart_break_cpu) begin
+	if(host_reset) begin
 		reset_cpu <= 1;
 		reset_cnt <= '1;
 	end else if(reset_cnt != 0) reset_cnt <= reset_cnt - 1'd1;
@@ -221,24 +212,17 @@ cdc_bit sync_reset_ios
 	.q(reset_ios)
 );
 
-wire uart_reset;
 cdc_bit sync_reset
 (
 	.clk(clk_sys),
 	.d(reset_cpu),
 	.q(reset)
 );
-cdc_bit sync_uart_reset
-(
-	.clk(clk_sys),
-	.d(uart_reset_cpu),
-	.q(uart_reset)
-);
 
 localparam [2:0] CENTRAL = 3'b000;
 localparam [2:0] BUFFER  = 3'b001;
 
-wire mem_req, mem_we, mem_take, mem_ack;
+wire mem_req, mem_we, mem_free, mem_ack, mem_code;
 wire [6:0] mem_len;
 wire [21:0] mem_addr;
 wire [63:0] mem_wdata;
@@ -262,12 +246,17 @@ wire [63:0] boot_wdata;
 wire boot_done, boot_missing;
 
 wire [63:0] mem_rdata;
-wire [3:0] other_take;
+wire [4:0] ddr3_take;
+wire [3:0] other_take = ddr3_take[4:1];
 wire cpu_held;
+
+// DDR3_LINES: lines of code the port to DDR3 keeps as they were read; 0: none
+localparam DDR3_LINES = 1024;
 
 ddr3_ports #(
 	.N(5),
-	.STREAM(5'b00001)
+	.STREAM(5'b00001),
+	.LINES(DDR3_LINES)
 ) ddr3
 (
 	.clk(clk_cpu),
@@ -275,11 +264,13 @@ ddr3_ports #(
 
 	.req({boot_req, tape_req, bm_req, cm_req, mem_req}),
 	.we({boot_we, 1'b0, bm_we, cm_we, mem_we}),
+	.code({4'b0000, mem_code}),
 	.len({7'd1, 7'd1, 7'd1, 7'd1, mem_len}),
 	.addr({boot_addr, tape_base + {4'd0, tape_addr}, BUFFER, bm_addr[21:0], CENTRAL, cm_addr, CENTRAL, mem_addr}),
 	.wdata({boot_wdata, 64'd0, bm_wdata, cm_wdata, mem_wdata}),
 	.user_rst({4'b0000, cpu_held}),
-	.take({other_take, mem_take}),
+	.take(ddr3_take),
+	.free0(mem_free),
 	.ack({boot_ack, tape_ack, bm_ack, cm_ack, mem_ack}),
 	.rdata(mem_rdata),
 
@@ -319,8 +310,8 @@ xmp_boot #(
 	.o_tape(tape_base)
 );
 
-wire [5:0] key_valid, key_ready, char_valid, char_ready;
-wire [41:0] key, char;
+wire [4:0] key_valid, key_ready, char_valid, char_ready;
+wire [34:0] key, char;
 
 wire [31:0] drive_lba;
 wire [8:0] drive_rd, drive_wr;
@@ -336,11 +327,12 @@ xmp_machine #(.CLOCKS_PER_MS(IOS_HZ / 1000)) machine
 	.i_real(status[15]),
 
 	.o_mem_req(mem_req),
+	.o_mem_code(mem_code),
 	.o_mem_we(mem_we),
 	.o_mem_len(mem_len),
 	.o_mem_addr(mem_addr),
 	.o_mem_wdata(mem_wdata),
-	.i_mem_take(mem_take),
+	.i_mem_take(mem_free),
 	.i_mem_ack(mem_ack),
 	.i_mem_rdata(mem_rdata),
 
@@ -454,14 +446,12 @@ localparam STATION  = 0;
 assign char_ready[1] = 1'b1;
 assign char_ready[2] = 1'b1;
 assign char_ready[4] = 1'b1;
-assign char_ready[5] = 1'b1;
 assign key_valid[1]  = 1'b0;
 assign key_valid[2]  = 1'b0;
 assign key_valid[4]  = 1'b0;
-assign key_valid[5]  = 1'b0;
 assign key[13:7]     = 7'd0;
 assign key[20:14]    = 7'd0;
-assign key[41:28]    = 14'd0;
+assign key[34:28]    = 7'd0;
 
 wire [13:0] con_tx_data, con_rx_data, term_data;
 wire [1:0] con_tx_valid, con_tx_ready, con_rx_valid, con_rx_ready, term_valid, term_ready;
@@ -604,12 +594,11 @@ term_keyboard #(.CAPS(1)) keyboard
 
 xmp_console #(
 	.CLK_HZ(CLK_HZ),
-	.BAUD(115200)
+	.BAUD(9600)
 ) console
 (
 	.clk(clk_sys),
 	.reset(reset),
-	.uart_reset(uart_reset),
 
 	.no_file(no_file),
 	.started(started),
@@ -631,7 +620,8 @@ xmp_console #(
 
 	.uart_rxd(UART_RXD),
 	.uart_txd(UART_TXD),
-	.uart_break(uart_break)
+	.uart_cts_n(UART_CTS),
+	.uart_rts_n(UART_RTS)
 );
 
 reg  [19:0] act_cnt;
@@ -652,7 +642,9 @@ assign LED_DISK = {1'b1, disk_cnt != 0};
 
 wire half, bell;
 
-wire font_8x8 = ~status[14];
+// The core has a raster of its own for a screen that needs 31 kHz lines, so
+// forced_scandoubler chooses that raster and the scandoubler is not used.
+wire font_8x8 = ~status[14] & ~forced_scandoubler;
 
 xmp_terminal terminal
 (
@@ -721,15 +713,10 @@ end
 
 wire [23:0] lit = !video ? 24'd0 : half ? {1'b0, rgb[23:17], 1'b0, rgb[15:9], 1'b0, rgb[7:1]} : rgb;
 
-wire [2:0] fx = status[9:7];
-
-reg doubled;
-always @(posedge clk_sys) doubled <= font_8x8 && (forced_scandoubler || (fx != 3'd0));
-
 wire mixer_de;
 
 assign CLK_VIDEO = clk_sys;
-assign VGA_SL = (fx > 3'd1) ? fx[1:0] - 2'd1 : 2'd0;
+assign VGA_SL = 0;
 
 video_mixer #(
 	.LINE_LENGTH(640),
@@ -739,8 +726,8 @@ video_mixer #(
 	.CLK_VIDEO(CLK_VIDEO),
 	.CE_PIXEL(CE_PIXEL),
 	.ce_pix(ce_pix),
-	.scandoubler(doubled),
-	.hq2x(fx == 3'd1),
+	.scandoubler(1'b0),
+	.hq2x(1'b0),
 	.gamma_bus(gamma_bus),
 	.R(lit[23:16]),
 	.G(lit[15:8]),

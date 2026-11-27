@@ -27,6 +27,29 @@ lint_off -rule UNUSEDSIGNAL -file "rtl/cray/cray-1x/i_buf.v" -match "*Bits of si
 // A vector length of 0 and of 100 octal both mean 64 elements, so the top bit
 // of VL does not change the count.
 lint_off -rule UNUSEDSIGNAL -file "rtl/cray/mem_fu.v" -match "*Bits of signal are not used: 'i_vector_length'[6]*"
+
+// Of the three memory ports only A and B load V registers and only C stores
+// them; only C reads the B and T registers, only A writes B and only B
+// writes T.  The ports are alike, so the signals come three a kind.
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/cray-1x/func_top.v" -match "*'vmem_wr'[2]*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/cray-1x/func_top.v" -match "*'vmem_wr_last'[2]*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/cray-1x/func_top.v" -match "*'vmem_wr_idx'[17:12]*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/cray-1x/func_top.v" -match "*'vmem_data'[191:128]*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/mem_fu.v" -match "*'x_blk_*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/mem_fu.v" -match "*'x_b_wr_en'*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/mem_fu.v" -match "*'x_t_wr_en'*"
+// A port that only reads takes no words from the registers, only the
+// addresses of a gather; one that only writes gets no words from memory.
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/mem_xfer.v" -match "*'i_v?_data'[63:22]*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/mem_xfer.v" -match "*'i_v_avail'*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/mem_xfer.v" -match "*'i_b_rd_data'*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/mem_xfer.v" -match "*'i_t_rd_data'*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/mem_xfer.v" -match "*'i_mem_ack'*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/mem_xfer.v" -match "*'i_mem_rd_data'*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/mem_xfer.v" -match "*'i_vk_avail'*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/mem_xfer.v" -match "*'g_oof'*"
+// of the A registers' read ports only A0's tells the memory unit where it reads from
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/cray-1x/func_top.v" -match "*Bits of signal are not used: 'a_rf_sel'[23:0]*"
 // only the low 22 bits of the address of a scalar reference count
 lint_off -rule UNUSEDSIGNAL -file "rtl/cray/cray-1x/func_top.v" -match "*Bits of signal are not used: 'a_h_data'[23:22]*"
 
@@ -41,6 +64,9 @@ lint_off -rule UNUSEDSIGNAL -file "rtl/cray/vector_shift.v" -match "*Bits of sig
 // off at fixed bit positions, so the low-order bits below are formed and then
 // dropped on purpose. The seed table entries are at most 255.
 lint_off -rule UNUSEDSIGNAL -file "rtl/cray/fp_mul.v" -match "*Bits of signal are not used: 's5_out'[6:0]*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/fp_mul.v" -match "*Bits of signal are not used: 'p_ll'[23:0]*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/fp_mul.v" -match "*Bits of signal are not used: 'p_sum'[15:0]*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/cray/fp_mul.v" -match "*Bits of signal are not used: 'corner'[39:0]*"
 lint_off -rule UNUSEDSIGNAL -file "rtl/cray/fp_recip.v" -match "*Bits of signal are not used: 'q'[31:8]*"
 lint_off -rule UNUSEDSIGNAL -file "rtl/cray/fp_recip.v" -match "*Bits of signal are not used: 'a1_wide'[27:24,5:0]*"
 lint_off -rule UNUSEDSIGNAL -file "rtl/cray/fp_recip.v" -match "*Bits of signal are not used: 's7_coef'[47,10:0]*"
@@ -78,11 +104,6 @@ lint_off -rule UNUSEDSIGNAL -file "rtl/cray/cray-1x/func_top.v" -match "*Bits of
 // The second vector logical unit is the full unit's module; it has no element test.
 lint_off -rule UNUSEDSIGNAL -file "rtl/cray/cray-1x/func_top.v" -match "*Signal is not used: 'v_log2_test'*"
 
-// The I/O Processor turns its 17 bits of carry and accumulator by shifting
-// them written twice; one half of each result is the answer.
-lint_off -rule UNUSEDSIGNAL -file "rtl/ios/iop_cpu.v" -match "*Bits of signal are not used: 'turned_r'[33:17]*"
-lint_off -rule UNUSEDSIGNAL -file "rtl/ios/iop_cpu.v" -match "*Bits of signal are not used: 'turned_l'[16:0]*"
-
 // Bit 2 of the control register one I/O Processor holds over another is the
 // dead dump, which nothing here does.
 lint_off -rule UNUSEDSIGNAL -file "rtl/ios/ios_core.v" -match "*Bits of signal are not used: 'over_*'[2]*"
@@ -93,12 +114,12 @@ lint_off -rule UNUSEDSIGNAL -file "rtl/ios/ios.v" -match "*Bits of signal are no
 lint_off -rule UNUSEDSIGNAL -file "rtl/ios/ios.v" -match "*Bits of signal are not used: 'dma_ack'[2]*"
 lint_off -rule UNUSEDSIGNAL -file "rtl/ios/ios.v" -match "*Bits of signal are not used: 'dma_rdata'[47:32]*"
 
-// Of the CPU's four channel pairs only the first, 10 and 11, leads anywhere:
+// Of the CPU's two channel pairs only the first, 10 and 11, leads anywhere:
 // to the MIOP.
-lint_off -rule UNUSEDSIGNAL -file "rtl/xmp_machine.v" -match "*Bits of signal are not used: 'out_ready'[3:1]*"
-lint_off -rule UNUSEDSIGNAL -file "rtl/xmp_machine.v" -match "*Bits of signal are not used: 'out_disconnect'[3:1]*"
-lint_off -rule UNUSEDSIGNAL -file "rtl/xmp_machine.v" -match "*Bits of signal are not used: 'in_resume'[3:1]*"
-lint_off -rule UNUSEDSIGNAL -file "rtl/xmp_machine.v" -match "*Bits of signal are not used: 'out_data'[63:16]*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/xmp_machine.v" -match "*Bits of signal are not used: 'out_ready'[1]*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/xmp_machine.v" -match "*Bits of signal are not used: 'out_disconnect'[1]*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/xmp_machine.v" -match "*Bits of signal are not used: 'in_resume'[1]*"
+lint_off -rule UNUSEDSIGNAL -file "rtl/xmp_machine.v" -match "*Bits of signal are not used: 'out_data'[31:16]*"
 
 // Keep the MiSTer framework out of lint diagnostics while using its real
 // module interfaces for elaboration. Generic lint_off covers lint/style
@@ -191,17 +212,19 @@ lint_off -rule PINMISSING -file "Cray-XMP.sv" -match "*Instance has missing pin:
 lint_off -rule PINMISSING -file "Cray-XMP.sv" -match "*Instance has missing pin: 'uart_mode'"
 lint_off -rule PINMISSING -file "Cray-XMP.sv" -match "*Instance has missing pin: 'uart_speed'"
 // MiSTer provides wider controls than this core consumes: of the status word
-// only the reset, colour, font, scale, scandoubler and aspect ratio bits, and
+// only the reset, colour, font, scale and aspect ratio bits, and
 // of the buttons only the user button.
-lint_off -rule UNUSEDSIGNAL -file "Cray-XMP.sv" -match "*Bits of signal are not used: 'status'[127:123,120:16,13:10,2:1]*"
+lint_off -rule UNUSEDSIGNAL -file "Cray-XMP.sv" -match "*Bits of signal are not used: 'status'[127:123,120:16,13:7,2:1]*"
 lint_off -rule UNUSEDSIGNAL -file "Cray-XMP.sv" -match "*Bits of signal are not used: 'buttons'[0]*"
 
 // Cray-XMP.sv: hps_io counts 16,384 bytes of a disk request and the largest here is
 // 4,096; Buffer Memory is 4 million words of the 16 million the channel can
-// address; four of the six consoles of the I/O Subsystem are not shown.
+// address; three of the five consoles of the I/O Subsystem are not shown.
 lint_off -rule UNUSEDSIGNAL -file "Cray-XMP.sv" -match "*Bits of signal are not used: 'sd_buff_addr'[13:12]*"
 lint_off -rule UNUSEDSIGNAL -file "Cray-XMP.sv" -match "*Bits of signal are not used: 'bm_addr'[23:22]*"
-lint_off -rule UNUSEDSIGNAL -file "Cray-XMP.sv" -match "*Bits of signal are not used: 'char'[41:28,20:7]*"
+lint_off -rule UNUSEDSIGNAL -file "Cray-XMP.sv" -match "*Bits of signal are not used: 'char'[34:28,20:7]*"
+// the CPU is told by free0 whether its request is taken
+lint_off -rule UNUSEDSIGNAL -file "Cray-XMP.sv" -match "*Bits of signal are not used: 'ddr3_take'[0]*"
 // Only the mounting of the printer's file and of a tape matters, and their lengths in
 // blocks of 512 bytes.
 lint_off -rule UNUSEDSIGNAL -file "Cray-XMP.sv" -match "*Bits of signal are not used: 'img_mounted'[1:0]*"
@@ -227,3 +250,6 @@ lint_off -rule UNUSEDSIGNAL -file "rtl/cray/res_lanes.v" -match "*i_ext_*"
 
 // The printer's screen has one page: the page bit of its addresses is not used.
 lint_off -rule UNUSEDSIGNAL -file "rtl/terminal/xmp_terminal.v" -match "*Bits of signal are not used: 'addr'[11]*"
+// The station takes seven bits of a byte of the serial port, as it takes seven
+// of a key.
+lint_off -rule UNUSEDSIGNAL -file "rtl/mister/xmp_console.v" -match "*Bits of signal are not used: 'ser_data'[7]*"

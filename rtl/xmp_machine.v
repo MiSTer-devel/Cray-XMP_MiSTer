@@ -35,6 +35,7 @@ module xmp_machine #(
 	// central memory for the CPU: requests in a stream, reads of up to 16
 	// words answered in order (the port of rtl/cray/cray_cpu.v)
 	output wire        o_mem_req,
+	output wire        o_mem_code,   // a read of instructions
 	output wire        o_mem_we,
 	output wire [ 6:0] o_mem_len,
 	output wire [21:0] o_mem_addr,
@@ -60,13 +61,13 @@ module xmp_machine #(
 	input  wire [63:0] i_bm_rdata,
 
 	// the consoles: 0 to 3 the MIOP's (3 the kernel's, 0 the station's), 4
-	// the BIOP's, 5 the XIOP's
-	input  wire [ 5:0] i_key_valid,
-	input  wire [41:0] i_key,
-	output wire [ 5:0] o_key_ready,
-	output wire [ 5:0] o_char_valid,
-	output wire [41:0] o_char,
-	input  wire [ 5:0] i_char_ready,
+	// the BIOP's
+	input  wire [ 4:0] i_key_valid,
+	input  wire [34:0] i_key,
+	output wire [ 4:0] o_key_ready,
+	output wire [ 4:0] o_char_valid,
+	output wire [34:0] o_char,
+	input  wire [ 4:0] i_char_ready,
 
 	// the boot tape, a .tap file in 64-bit words
 	output wire        o_tape_req,
@@ -118,8 +119,8 @@ module xmp_machine #(
 
 	// for the simulation
 	output wire        o_cpu_held,  // CPU Master Clear
-	output wire [ 2:0] o_step,
-	output wire [47:0] o_p
+	output wire [ 1:0] o_step,
+	output wire [31:0] o_p
 );
 
 	// the reset as the I/O Subsystem sees it, and its two Master Clear lines as
@@ -144,20 +145,24 @@ module xmp_machine #(
 	// The CPU is held from the reset until the MIOP lets go.  (The line is set
 	// while the I/O Subsystem is in reset; this covers the clocks until that is
 	// seen here.)
-	reg       cpu_rst;
+	// (Two registers of the same: one for the CPU, one for what is told
+	// outside, which is far from it.)
+	(* dont_merge *)reg       cpu_rst;
+	(* dont_merge *)reg       cpu_held;
 	reg [3:0] settle;
 	always @(posedge clk) begin
 		if (rst) settle <= 4'd15;
 		else if (settle != 4'd0) settle <= settle - 4'd1;
-		cpu_rst <= rst || (settle != 4'd0) || cpu_clear_f;
+		cpu_rst  <= rst || (settle != 4'd0) || cpu_clear_f;
+		cpu_held <= rst || (settle != 4'd0) || cpu_clear_f;
 	end
-	assign o_cpu_held = cpu_rst;
+	assign o_cpu_held = cpu_held;
 
 	// The channel pair between them.  A parcel stands on its lines from its
 	// Ready to its Resume, so it is there when the Ready arrives on the other
 	// side.
-	wire [3:0] out_ready, out_disconnect, in_resume;
-	wire [63:0] out_data;
+	wire [1:0] out_ready, out_disconnect, in_resume;
+	wire [31:0] out_data;
 	wire to_cpu_ready, to_cpu_disconnect, from_cpu_resume;
 	wire [15:0] to_cpu_parcel;
 	wire ios_ready, ios_disconnect, ios_resume;
@@ -278,6 +283,7 @@ module xmp_machine #(
 		.i_io_clear   (io_clear_f),
 
 		.o_mem_req  (o_mem_req),
+		.o_mem_code (o_mem_code),
 		.o_mem_we   (o_mem_we),
 		.o_mem_len  (o_mem_len),
 		.o_mem_addr (o_mem_addr),
@@ -286,14 +292,14 @@ module xmp_machine #(
 		.i_mem_ack  (i_mem_ack),
 		.i_mem_rdata(i_mem_rdata),
 
-		// pair 0 is channels 10 and 11; nothing is on the other three
-		.i_ch_in_ready      ({3'b0, to_cpu_ready}),
-		.i_ch_in_data       ({48'b0, to_cpu_parcel}),
+		// pair 0 is channels 10 and 11; nothing is on the other one
+		.i_ch_in_ready      ({1'b0, to_cpu_ready}),
+		.i_ch_in_data       ({16'b0, to_cpu_parcel}),
 		.o_ch_in_resume     (in_resume),
-		.i_ch_in_disconnect ({3'b0, to_cpu_disconnect}),
+		.i_ch_in_disconnect ({1'b0, to_cpu_disconnect}),
 		.o_ch_out_ready     (out_ready),
 		.o_ch_out_data      (out_data),
-		.i_ch_out_resume    ({3'b0, from_cpu_resume}),
+		.i_ch_out_resume    ({1'b0, from_cpu_resume}),
 		.o_ch_out_disconnect(out_disconnect),
 		.o_ch_out_mc        ()
 	);

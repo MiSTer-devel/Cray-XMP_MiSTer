@@ -31,6 +31,7 @@ set_global_assignment -name VERILOG_FILE rtl/terminal/term_video.v
 set_global_assignment -name VERILOG_FILE rtl/cray/cray_cpu.v
 set_global_assignment -name VERILOG_FILE rtl/cray/cray_mem_mux.v
 set_global_assignment -name VERILOG_FILE rtl/cray/mem_fu.v
+set_global_assignment -name VERILOG_FILE rtl/cray/mem_xfer.v
 set_global_assignment -name VERILOG_FILE rtl/cray/res_lanes.v
 set_global_assignment -name VERILOG_FILE rtl/cray/res_regfile.v
 set_global_assignment -name VERILOG_FILE rtl/cray/vector_add.v

@@ -1,11 +1,13 @@
 // Core-level simulation of the CRAY X-MP core (module emu of Cray-XMP.sv) with
 // stand-ins for hps_io, the PLL and the DDR3 port.  The bench does what a
 // user's MiSTer does: it loads the boot file into memory, serves the disk
-// images a block at a time, types on the keyboard or on the HPS serial port,
-// and reads the serial port and the video.
+// images a block at a time, types on the keyboard, and reads the video.  What
+// the consoles are sent it reads where the core hands a character to a
+// screen; the HPS serial port, the station's line, it works when asked to.
 //
 //   Vemu [BOOTFILE] [--disk N=FILE]... [--drive N=FILE]... [--type TEXT=KEYS]...
-//        [--press TEXT=KEYS]... [--until TEXT] [--ms N] [--reset-at MS] [--reset-on TEXT] [--screen C]...
+//        [--press TEXT=KEYS]... [--serial] [--send TEXT=BYTES]...
+//        [--until TEXT] [--ms N] [--reset-at MS] [--reset-on TEXT] [--screen C]...
 //        [--printed BLOCKS] [--printer OUT] [--until-printed TEXT] [--frame OUT.ppm] [--ddr fast|quick|normal|slow]
 //        [--disk-wait CLOCKS] [--burst] [--seed N] [--quiet] [--mount TEXT=FILE]... [--tape-out FILE]
 //        [--real-times] [--font16]
@@ -23,15 +25,21 @@
 // FILE as the tape of slot 3 once TEXT has been shown, in its turn among the
 // --type and --press; --tape-out writes that tape as it is at the end.
 //
-// --type sends KEYS on the serial port once a console has shown TEXT (\r is
-// RETURN); --press types them on the keyboard, where {f1}, {f2} and {f3} are
-// the keys that choose the screen.  Several are taken in order.  TEXT is found whatever
+// --type types KEYS on the keyboard once a console has shown TEXT (\r is
+// RETURN), and --press does the same; {f1}, {f2} and {f3} are the keys that
+// choose the screen.  Several are taken in order.  TEXT is found whatever
 // blanks and cursor movements lie between its characters; +N waits N
 // milliseconds instead.  TEXT is looked for on the operator's console, or on
 // the station if it begins with @0: (the numbers are those of the consoles in
-// sim/harness/ios_main.cpp); typed KEYS go to that console, pressed ones to the
-// one whose screen is shown.  With --burst the typed KEYS follow each other as
-// fast as the serial port carries them, not a few milliseconds apart.  The run ends when TEXT of --until has been shown,
+// sim/harness/ios_main.cpp).  Typed KEYS go to that console: the bench presses
+// F1 or F2 first if another screen is shown.  Pressed ones go to the console
+// whose screen is shown.  With --burst the keys follow each other as fast as
+// a keyboard can send them, not a few milliseconds apart.
+//
+// --serial has a program at the other end of the station's line: Clear To Send
+// is given, and what the port carries must be what the station was sent.  The
+// station then prints at the line's 9,600 baud.  --send puts BYTES on the line,
+// in its turn among the --type and --press.  The run ends when TEXT of --until has been shown,
 // or after N milliseconds of machine time (default 20000).  --reset-at presses
 // the menu's reset at that time, --reset-on when the operator's console has
 // shown TEXT.  --screen C prints a console's 24 lines at the end, and
@@ -39,8 +47,8 @@
 // last video frame.  --real-times chooses the menu's "Device times: Real",
 // --font16 its "Font: 8x16 (31kHz)".
 //
-// At the end the two screens in the core are compared with what the serial
-// port carried.  The CPU must not run before the operator has typed START:
+// At the end the two screens in the core are compared with what the consoles
+// were sent.  The CPU must not run before the operator has typed START:
 // the core's activity light tells.  Exit status: 0 if the text of --until was
 // shown (or none was asked for), the screens are right and the CPU waited, 1
 // if not.
@@ -143,10 +151,10 @@ int main(int argc, char **argv) {
     int printed_blocks = 0;
     std::string printer_out, until_printed;
     bool printer_screen = false;
-    bool quiet = false, burst = false, real_times = false, font16 = false;
+    bool quiet = false, burst = false, real_times = false, font16 = false, serial = false;
     uint32_t seed = 1;
     int until_console = 0, disk_wait = 200;
-    struct Typing { int console; bool pressed; std::string wait, keys; long delay; std::string mount; };
+    struct Typing { int console; bool pressed; std::string wait, keys; long delay; std::string mount; bool sent = false; };
     std::string tape_path, tape_out;
     int mounting = 0;
     std::vector<Typing> typing;
@@ -162,7 +170,7 @@ int main(int argc, char **argv) {
         else if (a == "--printed") printed_blocks = atoi(next().c_str());
         else if (a == "--printer") printer_out = next();
         else if (a == "--until-printed") until_printed = next();
-        else if (a == "--type" || a == "--press") {
+        else if (a == "--type" || a == "--press" || a == "--send") {
             std::string t = next(), keys; size_t eq = t.find('=');
             if (eq == std::string::npos) { fprintf(stderr, "%s takes TEXT=KEYS\n", a.c_str()); return 2; }
             for (size_t n = eq + 1; n < t.size(); n++) {
@@ -175,7 +183,7 @@ int main(int argc, char **argv) {
             std::string wait = t.substr(0, eq);
             int c = on_console(wait);
             long delay = wait.size() > 1 && wait[0] == '+' ? atol(wait.c_str() + 1) * CPU_KHZ : 0;
-            typing.push_back({c, a == "--press", squeeze(wait), keys, delay, ""});
+            typing.push_back({c, a == "--press", squeeze(wait), keys, delay, "", a == "--send"});
         }
         else if (a == "--mount") {
             std::string t = next(); size_t eq = t.find('=');
@@ -194,6 +202,7 @@ int main(int argc, char **argv) {
         else if (a == "--seed") seed = (uint32_t)atol(next().c_str());
         else if (a == "--quiet") quiet = true;
         else if (a == "--burst") burst = true;
+        else if (a == "--serial") serial = true;
         else if (a == "--real-times") real_times = true;
         else if (a == "--font16") font16 = true;
         else if (a == "--disk") { std::string t = next(); size_t eq = t.find('='); if (eq != std::string::npos) disk_files.push_back({atoi(t.c_str()), t.substr(eq + 1)}); }
@@ -205,8 +214,8 @@ int main(int argc, char **argv) {
     // central memory, Buffer Memory and the boot file: 0x3000_0000 to 0x3500_0000
     DdramModel ram(80u << 20, seed);
     if (ddr == "fast")      { ram.prof.lat_min = 1; ram.prof.lat_max = 1; ram.prof.busy_pct = 0; }
-    else if (ddr == "quick") { ram.prof.lat_min = 6; ram.prof.lat_max = 12; }
-    else if (ddr == "slow") { ram.prof.lat_min = 8; ram.prof.lat_max = 40; ram.prof.busy_pct = 30; ram.prof.gap_pct = 30; ram.prof.stall_pct_x1000 = 500; }
+    else if (ddr == "quick") { ram.prof.lat_min = 8; ram.prof.lat_max = 15; }
+    else if (ddr == "slow") { ram.prof.lat_min = 12; ram.prof.lat_max = 60; ram.prof.busy_pct = 30; ram.prof.gap_pct = 30; ram.prof.stall_pct_x1000 = 500; }
     if (!boot.empty() && !ram.load(boot, 0x4000000)) { fprintf(stderr, "cannot read %s\n", boot.c_str()); return 2; }
 
     HpsDisks disks(4);
@@ -254,6 +263,7 @@ int main(int argc, char **argv) {
 
     top->RESET = 1;
     top->UART_RXD = 1;
+    top->UART_CTS = !serial;             // low while a program has the port open
     top->DDRAM_BUSY = 0;
     // the menu's settings, after the first evaluation, which gives the status word its initial value
     top->eval();
@@ -263,9 +273,11 @@ int main(int argc, char **argv) {
     double cpu_acc = 0, ios_acc = 0;
     const double cpu_ratio = CPU_KHZ / 58800.0;  // CPU clock cycles per video clock cycle
 
-    std::string console[2];              // what the serial port carried: 0 the operator's console, 1 the station
+    std::string console[2];              // what the screens were sent: 0 the operator's console, 1 the station
+    std::string to_station;              // all of it for the station, resets or not, as the serial port has it
+    int shown_screen = 0;                // the screen the keyboard has chosen: 0 to 2
     Shown on[2];                         // and what the bench looks for in it
-    size_t seen = 0, printed = 0;
+    size_t printed = 0;
     size_t said = 0, at_key = 0;
     bool asked = false, shown = false;
     long clocks = 0, key_gap = 0, waited = 0, reset_left = 0, idle_for = 0;
@@ -287,15 +299,20 @@ int main(int argc, char **argv) {
         if (t == 40) r->emu__DOT__hps_io__DOT__sim_img_mounted = 4;
         if (t == 50) r->emu__DOT__hps_io__DOT__sim_img_mounted = 0;
 
-        // values the core drove during this video clock
-        mon.step(top->UART_TXD);
+        // values the core drove during this video clock: a character that a
+        // screen takes at the clock's end, and the station's line
+        if (serial) mon.step(top->UART_TXD);
         if (top->CE_PIXEL) vid.step(top->VGA_HS, top->VGA_VS, top->VGA_DE, top->VGA_R, top->VGA_G, top->VGA_B);
-        idle_for = top->UART_TXD ? idle_for + 1 : 0;
-        for (; seen < mon.text.size(); seen++) {
-            unsigned char b = mon.text[seen];
-            console[b >> 7].push_back(b & 0x7F);
-            on[b >> 7].put(b & 0x7F);
-        }
+        idle_for++;
+        for (int c = 0; c < 2; c++)
+            if (r->emu__DOT__console__DOT__term_valid >> c & 1) {
+                unsigned char b = r->emu__DOT__console__DOT__term_data >> (7 * c) & 0x7F;
+                console[c].push_back(b);
+                on[c].put(b);
+                if (c) to_station.push_back(b);
+                idle_for = 0;
+            }
+        if (serial && !top->UART_TXD) idle_for = 0;
         // the CPU is held until the kernel has been told to start it
         if (console[0].size() != start_looked) {
             start_looked = console[0].size();
@@ -320,20 +337,30 @@ int main(int argc, char **argv) {
         // the video clock's, sometimes before the falling edge and sometimes after.
         // The I/O Subsystem's clock, which is also the HPS interface's, is a third
         // one: 80 MHz against the CPU's 105.263, its edges between the CPU's.
+        // The port to DDR3 runs on the CPU's.
         cpu_acc += cpu_ratio;
         int n_cpu = (int)cpu_acc;
         cpu_acc -= n_cpu;
         int before = (t & 1) ? n_cpu : n_cpu / 2;
         for (int k = 0; k < n_cpu; k++) {
             if (k == before) { top->CLK_50M = 0; top->eval(); }
-            bool rd = top->DDRAM_RD, we = top->DDRAM_WE;      // driven during the CPU clock that ends here
-            uint32_t addr = top->DDRAM_ADDR; uint8_t bc = top->DDRAM_BURSTCNT, be = top->DDRAM_BE;
-            uint64_t din = top->DDRAM_DIN;
-            r->emu__DOT__pll_cpu__DOT__sim_clk = 1; top->eval();
-            ram.step(rd, we, addr, bc, din, be);
-            top->DDRAM_BUSY = ram.busy;
-            top->DDRAM_DOUT_READY = ram.dout_ready;
-            top->DDRAM_DOUT = ram.dout;
+            // The DDR3 stand-in follows the clock the core gives its port,
+            // DDRAM_CLK, which is the CPU's.
+            auto edge = [&](CData &clock) {
+                bool rd = top->DDRAM_RD, we = top->DDRAM_WE;      // driven during the port's clock that ends here
+                uint32_t addr = top->DDRAM_ADDR; uint8_t bc = top->DDRAM_BURSTCNT, be = top->DDRAM_BE;
+                uint64_t din = top->DDRAM_DIN;
+                bool was = top->DDRAM_CLK;
+                clock = 1; top->eval();
+                if (!was && top->DDRAM_CLK) {
+                    ram.step(rd, we, addr, bc, din, be);
+                    top->DDRAM_BUSY = ram.busy;
+                    top->DDRAM_DOUT_READY = ram.dout_ready;
+                    top->DDRAM_DOUT = ram.dout;
+                    top->eval();
+                }
+            };
+            edge(r->emu__DOT__pll_cpu__DOT__sim_clk);
             ios_acc += IOS_KHZ / (double)CPU_KHZ;
             if (ios_acc >= 1.0) {
                 ios_acc -= 1.0;
@@ -371,7 +398,12 @@ int main(int argc, char **argv) {
                 int toggle = (r->emu__DOT__hps_io__DOT__sim_ps2_key >> 10) & 1;
                 r->emu__DOT__hps_io__DOT__sim_ps2_key = ((toggle ^ 1) << 10) | key_events.front();
                 key_events.erase(key_events.begin());
-                key_gap = key_events.empty() ? 200000 : 20000;
+                // A keyboard sends a byte in about a millisecond, and a burst is keys that
+                // close.  Otherwise a key follows the one before after 6 ms, still faster
+                // than hands: the kernel takes some 300 characters a second, and what a
+                // terminal cannot hand over, because the few places of its console's queue
+                // are taken, it drops.
+                key_gap = burst ? 110000 : key_events.empty() ? 630000 : 20000;
             } else if (key_gap == 0 && ending < 0 && said < typing.size()) {
                 const Typing &ty = typing[said];
                 int c = ty.console;
@@ -391,16 +423,22 @@ int main(int argc, char **argv) {
                     r->emu__DOT__hps_io__DOT__sim_img_mounted = 8; mounting = 8;
                     said++; asked = false; waited = 0;
                     for (int n = 0; n < 2; n++) on[n].typed();
+                } else if (!ty.pressed && !ty.sent && at_key == 0 && (c ? shown_screen != 1 : shown_screen == 1)) {
+                    // typed keys are for a console: its screen first
+                    key_events = events_of(c ? 0x02 : 0x01); key_gap = 1;
+                    shown_screen = c;
                 } else {
-                    bool pressed = ty.pressed;
                     unsigned char key = at_key < ty.keys.size() ? ty.keys[at_key] : 0;
                     // what the last key brings is looked for from here on
                     if (++at_key >= ty.keys.size()) {
                         said++; at_key = 0; asked = false; waited = 0;
                         for (int n = 0; n < 2; n++) on[n].typed();
                     }
-                    if (pressed) { key_events = events_of(key); key_gap = 1; }
-                    else if (key) { drv.send(std::string(1, (char)(key | (c ? 0x80 : 0)))); key_gap = burst ? 1 : 200000; }
+                    if (ty.sent) { if (key) drv.send(std::string(1, (char)key)); key_gap = 630000; }
+                    else {
+                        if (key >= 0x01 && key <= 0x03) shown_screen = key - 1;
+                        key_events = events_of(key); key_gap = 1;
+                    }
                 }
             }
 
@@ -415,14 +453,24 @@ int main(int argc, char **argv) {
         }
         top->CLK_50M = 0; top->eval();
 
-        // At the end wait until the serial port has been silent for longer than
-        // a character and a deleted line take, so that the screens and the
-        // record of the port agree.
+        // At the end wait until the consoles have been sent nothing for longer
+        // than a deleted line takes, and the station's line has been silent for
+        // longer than a character, so that the screens, the line and the record
+        // of both agree.
         if (ending < 0 && (shown || clocks >= limit)) ending = 0;
-        if (ending >= 0 && (idle_for > 12000 || ++ending > 3000000)) break;
+        if (ending >= 0 && (idle_for > (serial ? 80000 : 12000) || ++ending > 3000000)) break;
     }
 
-    // the screens in the core against what the serial port carried
+    // what the station's line carried against what the station was sent
+    bool line_right = !serial || mon.text == to_station;
+    if (!line_right) {
+        size_t n = 0;
+        while (n < mon.text.size() && n < to_station.size() && mon.text[n] == to_station[n]) n++;
+        printf("\nthe station's line carried %zu characters and the station was sent %zu; they differ from character %zu on\n",
+               mon.text.size(), to_station.size(), n);
+    }
+
+    // the screens in the core against what the consoles were sent
     bool screens_right = true;
     for (int c = 0; c < 2; c++) {
         std::string want = screen(console[c]);
@@ -437,7 +485,7 @@ int main(int argc, char **argv) {
                 char got = cells[(y + top_row) % 24 * 80 + x] & 0x7F, expect = x < (int)lines[y].size() ? lines[y][x] : ' ';
                 got = got == 0 ? ' ' : AmpexScreen::shown(got);
                 if (got != expect) {
-                    printf("\nthe %s: line %d column %d shows %02x, the serial port says %02x\n", c ? "station's screen" : "operator's screen", y, x, got & 0xFF, expect & 0xFF);
+                    printf("\nthe %s: line %d column %d shows %02x, and was sent %02x\n", c ? "station's screen" : "operator's screen", y, x, got & 0xFF, expect & 0xFF);
                     screens_right = false;
                     break;
                 }
@@ -477,9 +525,10 @@ int main(int argc, char **argv) {
            clocks / (CPU_KHZ * 1e3), (unsigned long long)ram.reads, (unsigned long long)ram.writes, ram.bad_access ? ", BAD DDR3 ACCESS" : "",
            disks.reads, disks.writes, vid.frames, vid.last_lines, vid.hs_period);
     bool waited_for = !until.empty() || !until_printed.empty();
-    bool ok = (!waited_for || shown) && screens_right && !ram.bad_access && !ran_early;
+    bool ok = (!waited_for || shown) && screens_right && line_right && !ram.bad_access && !ran_early;
     if (waited_for) printf("%s\n", shown ? "the text was shown" : "the text was NOT shown");
-    if (!screens_right) printf("the screens are NOT what the serial port carried\n");
+    if (!screens_right) printf("the screens are NOT what the consoles were sent\n");
+    if (serial) printf("the station's line carried %zu characters%s\n", mon.text.size(), line_right ? ", those the station was sent" : ": NOT what the station was sent");
     if (ran_early) printf("the CPU did NOT wait for START\n");
     top->final();
     delete top;

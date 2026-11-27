@@ -33,7 +33,7 @@
 //!   the flags, the cluster number and the real-time clock.
 //! * Three clusters of shared registers: eight SB, eight ST and 32
 //!   semaphores each.
-//! * The 6 Mbyte channels 10 to 17 octal (see `channel`).
+//! * The 6 Mbyte channels 10 to 13 octal (see `channel`).
 //! * Dead start: the first step exchanges with the package at word 0 (XA is
 //!   forced to 0, HRM page 3-40).  Words 0 to 15 then hold the reset-state
 //!   package, which is noise on the real machine and undefined here.

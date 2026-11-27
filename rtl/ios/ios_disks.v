@@ -148,7 +148,7 @@ module ios_disks #(
 	reg [ 7:0] m_high;
 
 	// ---- the echo buffers: 512 parcels for each drive
-	reg  [15:0] echoes                   [0:8191];
+	reg  [15:0] echoes                   [0:DRIVES*512-1];
 	reg  [15:0] e_q;
 	wire [12:0] e_addr = {cur, m_n[8:0]};
 	always @(posedge clk) begin

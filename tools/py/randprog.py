@@ -335,7 +335,10 @@ class Gen:
             e('SM%02o' % jk, '0')
             e('SM%02o' % jk, '1,TS')
         elif c == 11: e('S%d' % self.sreg(), 'SR0')
-        elif c == 12: e(r.choice(['ERI', 'DRI', 'EBM', 'DBM', 'CMR', 'EFI', 'DFI']))
+        # (not EBM: with bidirectional memory on, a block read and a block write of
+        # the same words run together and the X-MP leaves their order to the
+        # program, HR-0097B page 31; the model cannot predict that)
+        elif c == 12: e(r.choice(['ERI', 'DRI', 'DBM', 'CMR', 'EFI', 'DFI']))
         else:
             # a store read back at once
             a = self.areg()

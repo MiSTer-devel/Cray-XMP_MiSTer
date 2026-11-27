@@ -2,22 +2,24 @@
 """Drive the CRAY X-MP core on a real MiSTer from the development machine.
 
   hil.py deploy [RBF]              copy the core and the on-device agent
-  hil.py start [BOOTFILE] [-t SEC] [--mgl PATH] [SESSION OPTIONS]
+  hil.py start [BOOTFILE] [-t SEC] [--mgl PATH] [PLAY OPTIONS AND STEPS]
                                    start the core through an MGL that mounts exp_disk.img,
                                    drives.img and printer.txt of games/Cray-XMP and loads
                                    the boot file (BOOTFILE is copied there first), then
-                                   work the consoles as `session` does; --mgl starts it
+                                   work the machine as `play` does; --mgl starts it
                                    through an MGL that is on the MiSTer already
-  hil.py session [-t SEC] [--break] [--type WAIT=KEYS]... [--until TEXT] [--screen C]...
-                                   work the consoles of the running core through the
-                                   serial port (see mister_agent.py); --break resets
-                                   the machine first
+  hil.py play [-t SEC] [--line] [--screen] STEP...
+                                   work the running core: a STEP is keys to type ({f1} the
+                                   operator's console, {f2} the station, \\r RETURN, letters
+                                   small), +N to wait N milliseconds, and with --line, which
+                                   opens the station's serial line, ?TEXT to wait for what
+                                   the station prints and >TEXT to send (see mister_agent.py)
   hil.py printed [--new]           what is in the printer's file; --new empties it first
   hil.py keys TEXT [--gap SEC]     type on a virtual keyboard: characters, \\r, \\xHH for
                                    control keys, {f1} to {f12} {enter} {esc} {up} {down} {backspace} {insert} for others,
                                    {s-f10} {c-f11} {cs-f11} with SHIFT, CTRL or both held
-  hil.py uart SEC [--break] [--send TEXT] [--until TEXT]
-                                   what the serial port carries, as it is
+  hil.py uart SEC [--send TEXT] [--until TEXT]
+                                   what the station's serial line carries, as it is
   hil.py peek WORD [COUNT] | poke WORD HEX... | fill WORD COUNT HEX
   hil.py dump FILE WORD COUNT      copy a memory range to a local file
   hil.py shot OUT.png [--scaled]   take a screenshot (needs direct video off); --scaled is
@@ -29,7 +31,11 @@
 The disk images are not copied by this script: unpack the package for the SD
 card (tools/py/mkcos.py) on the MiSTer once.
 
-Environment: MISTER (default root@mister), MISTER_PW (default 1).
+Environment: MISTER (default root@mister), MISTER_PW (default 1).  To try a
+core beside the one that is installed: MISTER_RBF, the core `start` loads, as
+an MGL names it (default _Computer/Cray-XMP; with it `deploy` copies the core
+there), and MISTER_SET, a folder in games/Cray-XMP with images and boot files
+of its own, which `start` and `printed` then use.
 """
 import os
 import subprocess
@@ -42,8 +48,11 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 SSH_OPTS = ['-o', 'PreferredAuthentications=password', '-o', 'PubkeyAuthentication=no',
             '-o', 'StrictHostKeyChecking=accept-new', '-o', 'LogLevel=ERROR', '-o', 'ConnectTimeout=8']
 CORE = 'Cray-XMP'
-RBF_DEV = '/media/fat/_Computer/%s.rbf' % CORE
-GAMES = '/media/fat/games/%s' % CORE
+RBF = os.environ.get('MISTER_RBF', '_Computer/' + CORE)     # as an MGL names it: no date, no .rbf
+RBF_DEV = '/media/fat/%s.rbf' % RBF
+SET = os.environ.get('MISTER_SET', '')
+GAMES = '/media/fat/games/%s' % CORE + ('/' + SET if SET else '')
+IN_SET = SET + '/' if SET else ''                           # in front of a file's name in an MGL
 AGENT = '/tmp/mister_agent.py'
 MGL = '/tmp/%s_test.mgl' % CORE
 # the printer's file when nothing has been printed: 8 MB of empty lines
@@ -92,7 +101,7 @@ def agent(args, capture=False):
 
 def cmd_deploy(args):
     rbf = args[0] if args else os.path.join(ROOT, 'output_files', CORE + '.rbf')
-    ssh('mkdir -p %s' % GAMES)
+    ssh('mkdir -p %s %s' % (GAMES, os.path.dirname(RBF_DEV)))
     scp_to(rbf, RBF_DEV)
     push_agent()
     print('deployed %s' % rbf)
@@ -107,12 +116,13 @@ def take_time(args, default):
     return default
 
 
-def run_session(seconds, args, then=''):
-    """Run the agent's session on the MiSTer, detached, because the network can
-    drop while a core loads; `then` is a shell command to run once it listens."""
+def run_play(seconds, args, then=''):
+    """Run the agent's play on the MiSTer, detached, because the network can
+    drop while a core loads; `then` is a shell command to run once it has
+    begun.  `seconds` is how long the steps are given."""
     quoted = ' '.join("'%s'" % a.replace("'", "'\\''") for a in args)
-    script = ('python3 %s session %g %s > /tmp/xmp_session.txt 2>&1\necho $? > /tmp/xmp_session.done\n'
-              % (AGENT, seconds, quoted))
+    script = ('python3 %s play %s > /tmp/xmp_session.txt 2>&1\necho $? > /tmp/xmp_session.done\n'
+              % (AGENT, quoted))
     ssh("rm -f /tmp/xmp_session.done; cat > /tmp/xmp_session.sh <<'HILEOF'\n%sHILEOF\n"
         "(sh /tmp/xmp_session.sh > /dev/null 2>&1 &) ; sleep 0.5; %s" % (script, then or 'true'))
     end = time.time() + seconds + 30
@@ -138,15 +148,14 @@ def cmd_start(args):
         path = MGL
         if args and not args[0].startswith('--'):
             scp_to(args.pop(0), GAMES + '/boot.ios')
-        mgl = ('<mistergamedescription><rbf>_Computer/' + CORE + '</rbf>'
-               '<file delay="1" type="s" index="0" path="exp_disk.img"/>'
-               '<file delay="1" type="s" index="1" path="drives.img"/>'
-               '<file delay="1" type="s" index="2" path="printer.txt"/>'
-               '<file delay="1" type="f" index="1" path="boot.ios"/></mistergamedescription>')
+        mgl = ('<mistergamedescription><rbf>' + RBF + '</rbf>'
+               '<file delay="1" type="s" index="0" path="' + IN_SET + 'exp_disk.img"/>'
+               '<file delay="1" type="s" index="1" path="' + IN_SET + 'drives.img"/>'
+               '<file delay="1" type="s" index="2" path="' + IN_SET + 'printer.txt"/>'
+               '<file delay="1" type="f" index="1" path="' + IN_SET + 'boot.ios"/></mistergamedescription>')
         ssh("cat > %s <<'EOF'\n%s\nEOF" % (MGL, mgl))
         ssh("test -f %s/printer.txt || %s" % (GAMES, NEW_PRINTER))
-    # the screens are empty when the core starts
-    run_session(seconds, ['--fresh'] + args, 'echo "load_core %s" > /dev/MiSTer_cmd' % path)
+    run_play(seconds, args, 'echo "load_core %s" > /dev/MiSTer_cmd' % path)
 
 
 def cmd_printed(args):
@@ -158,10 +167,10 @@ def cmd_printed(args):
     sys.stdout.buffer.write(text.rstrip(b'\n') + b'\n')
 
 
-def cmd_session(args):
-    seconds = take_time(args, 30)
+def cmd_play(args):
+    seconds = take_time(args, 60)
     push_agent()
-    run_session(seconds, args)
+    run_play(seconds, args)
 
 
 def cmd_shot(args):
@@ -209,7 +218,7 @@ def main():
     c, args = sys.argv[1], sys.argv[2:]
     if c == 'deploy': cmd_deploy(args)
     elif c == 'start': cmd_start(args)
-    elif c == 'session': cmd_session(args)
+    elif c == 'play': cmd_play(args)
     elif c == 'printed': cmd_printed(args)
     elif c == 'shot': cmd_shot(args)
     elif c == 'direct-video': cmd_direct_video(args)

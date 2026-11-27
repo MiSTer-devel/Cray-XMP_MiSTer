@@ -90,7 +90,11 @@ module iop #(
 	// The lowest numbered channel that asks for an interrupt, as its flags stand
 	// in this clock: a function is one clock, and the instruction behind it has
 	// to find what the function left.
-	reg [5:0] lowest;
+	reg [ 5:0] lowest;
+	// a parcel was written through the second port of Local Memory in the
+	// clock before, at this address
+	reg        stored;
+	reg [15:0] stored_at;
 	iop_cpu cpu (
 		.clk             (clk),
 		.rst             (i_master_clear),
@@ -98,6 +102,8 @@ module iop #(
 		.o_mem_we        (mem_we),
 		.o_mem_wdata     (mem_wdata),
 		.i_mem_rdata     (mem_q),
+		.i_store         (stored),
+		.i_store_addr    (stored_at),
 		.o_channel       (number),
 		.o_function      (fn),
 		.o_strobe        (strobe),
@@ -106,6 +112,7 @@ module iop #(
 		.i_busy          (busy_now),
 		.i_done          (done_now),
 		.i_request       (lowest),
+		.i_hold          (1'b0),
 		.o_step          (o_step),
 		.o_step_interrupt(),
 		.o_p             (o_p),
@@ -115,25 +122,45 @@ module iop #(
 	);
 
 	// 65,536 parcels with two ports: the processor's, and one for the
-	// Buffer Memory channel and the interfaces outside.  Block memory makes no
+	// Buffer Memory channel and the interfaces outside.  The processor is told
+	// of every parcel written through the second: its instruction stack may
+	// hold it.  It is told in the clock after the write, from registers: an
+	// instruction that issues in the clock of the write is the parcel Local
+	// Memory held until then, and a parcel the stack reads in that clock is
+	// among those it gives up.  Block memory makes no
 	// promise for a parcel that is read in the clock it is written in, and
 	// nothing here uses one: with RW_POISON the simulation makes such a read
 	// wrong, and the tests pass all the same.
-	(* ramstyle = "no_rw_check" *) reg [15:0] mem[0:65535]  /* verilator public_flat_rw */;
+	//
+	// A memory block of the chip is 10,240 bits, as 2,048 words of 5 or as
+	// 8,192 of one.  Sixteen bits a parcel leave a fifth of every block unused
+	// whichever way it is cut: 128 blocks for 103 blocks of bits.  So the
+	// parcel is kept in two memories, fifteen bits in blocks of 2,048 by 5 and
+	// the sixteenth in blocks of 8,192 by 1, which take 96 and 8.
+	(* ramstyle = "no_rw_check", max_depth = 2048 *)reg [14:0] mem_lo[0:65535]  /* verilator public_flat_rw */;
+	(* ramstyle = "no_rw_check" *)reg        mem_hi[0:65535]  /* verilator public_flat_rw */;
 	reg [15:0] port_addr, port_wdata;
 	reg        port_we;
 	reg [15:0] port_q;
 	always @(posedge clk) begin
-		if (mem_we) mem[mem_addr] <= mem_wdata;
-		mem_q <= mem[mem_addr];
+		if (mem_we) begin
+			mem_lo[mem_addr] <= mem_wdata[14:0];
+			mem_hi[mem_addr] <= mem_wdata[15];
+		end
+		mem_q <= {mem_hi[mem_addr], mem_lo[mem_addr]};
 `ifdef RW_POISON
 		if (mem_we) mem_q <= ~mem_wdata;
 		if (port_we && port_addr == mem_addr) mem_q <= ~port_wdata;
 `endif
 	end
 	always @(posedge clk) begin
-		if (port_we) mem[port_addr] <= port_wdata;
-		port_q <= mem[port_addr];
+		if (port_we) begin
+			mem_lo[port_addr] <= port_wdata[14:0];
+			mem_hi[port_addr] <= port_wdata[15];
+		end
+		port_q    <= {mem_hi[port_addr], mem_lo[port_addr]};
+		stored    <= port_we && !i_master_clear;
+		stored_at <= port_addr;
 `ifdef RW_POISON
 		if (port_we) port_q <= ~port_wdata;
 		if (mem_we && mem_addr == port_addr) port_q <= ~mem_wdata;

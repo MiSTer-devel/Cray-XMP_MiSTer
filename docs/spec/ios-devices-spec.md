@@ -60,7 +60,7 @@ Bit numbering in this note: bit 0 is the least significant bit (2^0), as in HW.
 | IOP 0, MIOP | yes | 65,536 parcels of Local Memory. Starts first. |
 | IOP 1, BIOP | yes | Disks and the 100 Mbyte channel. |
 | IOP 2, DIOP | no | cfg marks it absent; the kernel never touches it (log: no function ever issued by or for IOP 2; MIOP channels 10 and 11 only get the initial clear). |
-| IOP 3, XIOP | **yes with the stock software** | See 1.3. |
+| IOP 3, XIOP | yes with the stock software; **no** with six parcels of the boot tape changed, which is what the core does | See 1.3. |
 
 Channel assignments (cfg; they match the typical assignment in [HW C-1/213 to C-5/217]):
 
@@ -143,9 +143,34 @@ deadstart: the kernel deadstarts IOP 2 and IOP 3 according to the section pointe
 So the choices are:
 
 1. Build IOP 3 as a third copy of the IOP with a stub block multiplexer channel on channel 20
-   (section 11.3). This is what the simulator does and is known to boot and run jobs.
-2. Two IOPs plus the AMAP patch plus one more patch that is **not yet found**: either COS must
-   not send the `D` packet, or CDEM must answer it instead of halting (Q1).
+   (section 11.3). This is what the simulator does and is known to boot and run jobs. The core
+   was first built this way.
+2. Two IOPs plus the AMAP patch plus something for the `D` packet. Both ways of dealing with it
+   were found later and are what the core now does (below).
+
+The `D` packet, on the system model with two IOPs and the AMAP patch:
+
+- **COS does not send it when it has no tape device.** The stock parameter lists have
+  `*CONFIG,DVN=MTn,NAVAIL`, and with that, or with the tapes not mentioned, COS still sends one
+  `D` packet after `REPLY,0,GO` (the last packet in before the halt is `0044 4331 ...`). With
+  `*CONFIG,DVN=MTn` and nothing behind the name, which deletes a tape device (SM-0043G 5.2.6.2),
+  no `D` packet is sent at all and start-up completes. `tools/py/mkcos.py` writes the lists so.
+- **CDEM can drop it.** CDEM is overlay 0x13; its header is at byte 0x2FD4 of tape file 0 and
+  its code starts at 0x2FE4. Code parcel 0x1F, at byte 0x3022, is the branch of the `D` case:
+  0x700A, `P = P + 10`, to parcel 0x29, which sets destination IOP 3 and sends the packet on; the
+  kernel's send routine at 0x0685 finds no link for that IOP and halts with code 020. Changed to
+  0x700F, `P = P + 15`, it goes to parcel 0x2E, the RELDAL that the original also performs after
+  sending: the packet is released and nothing is sent. The stock XIOP gives the start-up packet
+  no answer either (one `0044 4331` packet in, no reply; SM-0046G 4.3.1). With this the stock
+  lists with `NAVAIL` start too.
+
+Both are applied: six parcels on the tape (five of AMAP and the one of CDEM, `TWO_IOPS` in
+`tools/py/mkboot.py`) and the parameter lists of the package. Run on the model with two IOPs:
+install on an empty drive, the set-up job, the example jobs, an interactive session, and a
+second start from the same drive. What differs for an operator: the kernel's `CONFIG` has
+channels 12 and 13 blank and says `IOP NOT CONFIGURED` for `CONFIG 3`; the BIOP's `MOS SIZE` is
+13426K where it was 1616K; the station's `TAPE` lists nothing. Not tried: `H` packets (CDEM
+takes their destination from the packet), the system dump, `START COS_117 RESTART`.
 
 COS itself does not need the tapes: the deadstart parameter file configures `MT0` to `MT3` as
 `NAVAIL` (`cray-sim/target/cos_117/disk_content/station/deadstart.param`).
@@ -1212,7 +1237,7 @@ AMAP patch was applied as `Size 2` tape patches at 0x12, 0x25, 0x26, 0x53 and 0x
 
 | # | Question | Best answer |
 |---|---|---|
-| Q1 | Can IOP 3 be configured out? | Half solved (section 1.3). With five parcels of AMAP zeroed the IOS starts and the station logs on with two IOPs; the MIOP then halts in CDEM (`HALT 020`) when COS sends its tape packet. Still needed: a COS or CDEM patch for that packet. `SM-0043G` (PDF 84 to 96) describes the configuration parameters; the overlay disassembly is in `cray-sim/target/cos_117/disasm/iop_overlay1/` (`CDEM.asm`). Until solved, build three IOPs. |
+| Q1 | Can IOP 3 be configured out? | Solved (section 1.3): five parcels of AMAP, one of CDEM, and parameter lists that delete the tape devices. The core has two IOPs. `SM-0043G` (PDF 84 to 96) describes the configuration parameters; the overlay disassembly is in `cray-sim/target/cos_117/disasm/iop_overlay1/` (`CDEM.asm`). |
 | Q2 | How does the DEADSTART button load file 0 from tape or disk into Local Memory? | Not in HW, SWI or OPS. Avoid it: deadstart from Buffer Memory as the simulator does. |
 | Q3 | Master Clear and XA. | The manual forces XA to 0 [XMP 3-14/64]; the simulator leaves XA alone. COS's package is at 0, so force 0. |
 | Q4 | I/O Clear "activates the MCU input channel" [XMP 3-21/71]. | The simulator makes all channels inactive, and the software works: COS sets CL and CA itself. If channel 10 were active with CA = 0 the date packet could be stored at address 0. Leave it inactive and hold the first Ready. |

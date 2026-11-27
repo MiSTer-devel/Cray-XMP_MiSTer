@@ -1,0 +1,9 @@
+// Verilator arguments for the bench of the port to DDR3.
+--cc --exe --build -j 0
+--top-module ddr3_ports_tb
+-Wno-fatal -Wno-WIDTH -Wno-UNUSED -Wno-DECLFILENAME
+-O3 --x-assign unique --x-initial unique
+-CFLAGS "-O2 -std=c++17"
+sim/tb/ddr3_ports_tb.sv
+rtl/mister/ddr3_ports.sv
+sim/harness/ddr3_main.cpp

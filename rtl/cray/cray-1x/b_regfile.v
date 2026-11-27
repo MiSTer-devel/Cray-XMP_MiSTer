@@ -14,6 +14,8 @@ module b_regfile (
 	clk,
 	i_jk_addr,
 	o_jk_data,
+	i_mem_addr,
+	o_mem_data,
 	i_wr_addr,
 	i_wr_data,
 	i_wr_en,
@@ -29,6 +31,8 @@ module b_regfile (
 	input wire clk;
 	input wire [LOGDEPTH-1:0] i_jk_addr;
 	output wire [WIDTH-1:0] o_jk_data;
+	input wire [LOGDEPTH-1:0] i_mem_addr;  //the register a block transfer asks for,
+	output reg [WIDTH-1:0] o_mem_data;  //read from a copy of its own: there in the next clock
 	input wire [LOGDEPTH-1:0] i_wr_addr;
 	input wire [WIDTH-1:0] i_wr_data;
 	input wire i_wr_en;
@@ -53,5 +57,13 @@ module b_regfile (
 
 	//read registers
 	assign o_jk_data = data[i_jk_addr];
+
+	//A block transfer reads the registers by an address of its own, from a
+	//second copy of them (see t_regfile_hard.v).
+	(* ramstyle = "M10K" *) reg [WIDTH-1:0] copy[DEPTH-1:0];
+	always @(posedge clk) begin
+		if (write_enable) copy[wr_addr] <= data_to_be_written;
+		o_mem_data <= copy[i_mem_addr];
+	end
 
 endmodule

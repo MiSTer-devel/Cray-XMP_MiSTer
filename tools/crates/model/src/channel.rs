@@ -1,6 +1,11 @@
-//! The 6 Mbyte channels: channels 10 to 17 octal, even
+//! The 6 Mbyte channels: channels 10 to 13 octal, even
 //! numbers input, odd numbers output (CSM-0111000 pages 2-15 to 2-19, 5-9,
 //! 5-37 and appendix B).
+//!
+//! A mainframe has up to four pairs, 10 to 17, two to each of its I/O
+//! ports.  This one has the two pairs of the upper port, as the smallest
+//! X-MP, the X-MP/14se, has (HR-3005 tables 4-1 and 4-2); 14 to 17 name no
+//! channel, as 0 to 7 name none.
 //!
 //! A channel moves 16-bit parcels between a device and central memory, four
 //! to a word, parcel 0 (bits 63 to 48) first.  The program sets the limit
@@ -62,10 +67,10 @@ pub struct ChannelState {
 }
 
 impl Machine {
-    /// The index of channel `number` (10 to 17 octal); the machine looks only
-    /// at the low four bits of the number and passes over 0 to 7.
+    /// The index of channel `number` (10 to 13 octal); the machine looks only
+    /// at the low four bits of the number and passes over 0 to 7 and 14 to 17.
     pub(crate) fn channel_index(&self, number: u32) -> Option<usize> {
-        (number & 0o17 >= 0o10).then_some((number & 7) as usize)
+        (number & 0o14 == 0o10).then_some((number & 3) as usize)
     }
 
     /// True if any channel asks for the I/O interrupt.
@@ -123,7 +128,7 @@ impl Machine {
                 ..Channel::default()
             };
         }
-        self.loop_waiting = [false; 4];
+        self.loop_waiting = [false; 2];
     }
 
     fn channel_store(&mut self, address: u32, word: u64) {
@@ -153,9 +158,9 @@ impl Machine {
 
     // ---- the device end
 
-    /// What a program can see of channel `number` (10 to 17 octal).
+    /// What a program can see of channel `number` (10 to 13 octal).
     pub fn channel(&self, number: u32) -> ChannelState {
-        let c = &self.channels[(number & 7) as usize];
+        let c = &self.channels[(number & 3) as usize];
         ChannelState {
             ca: c.ca,
             cl: c.cl,
@@ -170,7 +175,7 @@ impl Machine {
     /// Returns true if the channel answered Resume at once; if not, the
     /// Ready is held and `channel_resumed` tells when the answer comes.
     pub fn channel_input(&mut self, number: u32, parcel: u16) -> bool {
-        let n = (number & 6) as usize;
+        let n = (number & 2) as usize;
         if self.channels[n].active {
             self.channel_accept(n, parcel);
             self.channels[n].resumed = false;
@@ -183,13 +188,13 @@ impl Machine {
 
     /// True once after a held Ready of input channel `number` was answered.
     pub fn channel_resumed(&mut self, number: u32) -> bool {
-        std::mem::take(&mut self.channels[(number & 6) as usize].resumed)
+        std::mem::take(&mut self.channels[(number & 2) as usize].resumed)
     }
 
     /// The device of input channel `number` sends Disconnect: the end of
     /// its data.  Ignored unless the channel is active.
     pub fn channel_disconnect(&mut self, number: u32) {
-        let n = (number & 6) as usize;
+        let n = (number & 2) as usize;
         let c = &mut self.channels[n];
         if !c.active {
             return;
@@ -207,7 +212,7 @@ impl Machine {
 
     /// The parcel output channel `number` holds out with Ready, if any.
     pub fn channel_output(&mut self, number: u32) -> Option<u16> {
-        let n = (number & 6) as usize + 1;
+        let n = (number & 2) as usize + 1;
         if !self.channels[n].active {
             return None;
         }
@@ -232,7 +237,7 @@ impl Machine {
     /// Returns true if the channel then sends Disconnect: that parcel was
     /// the last of the transfer.
     pub fn channel_resume(&mut self, number: u32) -> bool {
-        let n = (number & 6) as usize + 1;
+        let n = (number & 2) as usize + 1;
         let c = &mut self.channels[n];
         if !c.active || c.count == 0 {
             return false;
@@ -254,7 +259,7 @@ impl Machine {
 
     /// Move what the looped-back channels can move now.
     pub(crate) fn channel_loop(&mut self) {
-        for pair in 0..4u32 {
+        for pair in 0..2u32 {
             let (input, output) = (0o10 + 2 * pair, 0o11 + 2 * pair);
             // a held Ready that has since been answered
             if self.loop_waiting[pair as usize] {

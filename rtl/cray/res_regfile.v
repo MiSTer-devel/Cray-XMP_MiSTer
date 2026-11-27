@@ -51,14 +51,19 @@ module res_regfile #(
 	input wire [  2:0] i_x_addr,
 	input wire [W-1:0] i_x_data,
 
-	input  wire [3*NP-1:0] i_addr,
-	input  wire [3*NP-1:0] i_addr_nxt,
-	input  wire            i_issue,
-	input  wire [  NB-1:0] i_next_v,
-	input  wire [3*NB-1:0] i_next_d,
-	input  wire [  NB-1:0] i_now_lane,  // the current instruction is one, and its result takes this lane (of ONE)
-	input  wire [     2:0] i_now_d,
-	output wire [W*NP-1:0] o_data,
+	input  wire [     3*NP-1:0] i_addr,
+	input  wire [     3*NP-1:0] i_addr_nxt,
+	input  wire                 i_issue,
+	input  wire [       NB-1:0] i_next_v,
+	input  wire [     3*NB-1:0] i_next_d,
+	input  wire [       NB-1:0] i_now_lane,  // the current instruction is one, and its result takes this lane (of ONE)
+	input  wire [          2:0] i_now_d,
+	output wire [     W*NP-1:0] o_data,
+	// for a compare that is made on every source at once and picked afterwards:
+	// for each port the register itself (the top bit) or the lane it reads, and
+	// register 0 as it stands
+	output wire [NP*(NB+1)-1:0] o_sel,
+	output wire [        W-1:0] o_r0,
 
 	input  wire [  2:0] i_ex_addr,
 	output wire [W-1:0] o_ex_data,
@@ -71,6 +76,7 @@ module res_regfile #(
 	reg [W-1:0] data[0:7];
 
 	assign o_ex_data = data[i_ex_addr];
+	assign o_r0      = data[0];
 	assign o_r0_neg  = data[0][W-1];
 
 	// ---- in
@@ -160,7 +166,8 @@ module res_regfile #(
 				q = data[cur] & {W{own}};
 				for (n = 0; n < NB; n = n + 1) q = q | (i_data[W*n+:W] & {W{hit[n]}});
 			end
-			assign o_data[W*p+:W] = q;
+			assign o_data[W*p+:W]          = q;
+			assign o_sel[(NB+1)*p+:(NB+1)] = {own, hit};
 		end
 	endgenerate
 

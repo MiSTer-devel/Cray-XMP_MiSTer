@@ -13,7 +13,10 @@ of his [cray-sim](https://github.com/andrastantos/cray-sim) project, unchanged:
   programs. [tools/py/expdisk.py](../../tools/py/expdisk.py) lists it.
 
 [tools/py/mkcos.py](../../tools/py/mkcos.py) makes the package for the SD
-card from them.
+card from them. The software is configured for three I/O Processors and the
+core has two: six parcels of the boot tape are changed for that on the way
+into the boot file, and the files here stay as they are
+([the I/O Subsystem](../../docs/MACHINE.md#the-io-subsystem)).
 
 The files come with the cray-sim project's licence, for non-commercial use
 ([LICENSE-cray-sim](LICENSE-cray-sim)). COS is the work of Cray Research.

@@ -117,6 +117,52 @@ fn the_start_of_the_kernel_matches_the_recorded_boot() {
     }
 }
 
+/// The core's I/O Subsystem: the XIOP left out and the software told so.
+/// The kernel starts the BIOP alone and asks for the date, and its list of
+/// channels names no third processor.
+#[test]
+fn the_kernel_boots_with_two_iops() {
+    let Some(mut config) = config() else {
+        eprintln!("skipped: the COS 1.17 system is not here");
+        return;
+    };
+    if cfg!(debug_assertions) {
+        config.poke_kernel(0x42B7, 0x0200);
+        config.poke_kernel(0x43DA, 0);
+    }
+    assert!(config.two_iops(), "the tape is not the COS 1.17 boot tape");
+    // a second time changes nothing
+    assert!(config.two_iops());
+    let mut system = System::new(config);
+    let shows =
+        |system: &System, text: &str| String::from_utf8_lossy(system.console(0, 3)).contains(text);
+    for _ in 0..15_000 {
+        // (the whole question: its characters come one after the other)
+        if shows(&system, "ENTER DATE [MM/DD/YY]") {
+            break;
+        }
+        system.run(MILLISECOND);
+    }
+    let console = String::from_utf8_lossy(system.console(0, 3)).into_owned();
+    for text in [
+        "IOP-0 KERNEL, VERSION 4.2.2",
+        "IOP1 A->A",
+        "ENTER DATE [MM/DD/YY]",
+    ] {
+        assert!(
+            console.contains(text),
+            "`{}` is not on the kernel console:\n{}",
+            text,
+            console
+        );
+    }
+    assert!(!console.contains("IOP3"), "{}", console);
+    assert!(!system.iop(1).held());
+    assert!(system.iop(2).held() && system.iop(3).held());
+    assert!(String::from_utf8_lossy(system.console(1, 1)).contains("IOP-1 KERNEL, VERSION 4.2.2"));
+    assert!(system.cpu_held() && system.cpu_starts() == 0);
+}
+
 /// The kernel as it is, on devices that take their time: it tests its
 /// memory and Buffer Memory, loads the overlays, starts the BIOP and the
 /// XIOP and asks the operator for the date.
@@ -136,7 +182,8 @@ fn the_kernel_boots_to_its_first_question() {
     let shows =
         |system: &System, text: &str| String::from_utf8_lossy(system.console(0, 3)).contains(text);
     for _ in 0..15_000 {
-        if shows(&system, "ENTER DATE") {
+        // (the whole question: its characters come one after the other)
+        if shows(&system, "ENTER DATE [MM/DD/YY]") {
             break;
         }
         system.run(MILLISECOND);

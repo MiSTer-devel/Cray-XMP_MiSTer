@@ -25,11 +25,28 @@
 // of nine units of 2^-56 makes up for the average of what was cut, and the
 // rounded forms add round bits in the same adder.
 //
+// The pyramid is not built row by row here.  With the coefficients as whole
+// numbers A and B of 48 bits it is the logical products of bit i of A and
+// bit j of B with i + j of 40 or more, in units of 2^40: the whole product
+// A * B less the corner T of the products with i + j below 40.  Every product
+// outside the corner is a multiple of 2^40, so the low 40 bits of T are those
+// of A * B, and the pyramid is (A * B) / 2^40 less T / 2^40, both without
+// their fractions.  T / 2^40 is 39 at most.  The multiplications are made by
+// the chip's multipliers: A * B from four of 24 by 24, and the corner from
+// one of 20 by 20 (the low halves of the low 40 bits, whose products all lie
+// in it) and two corners of half the size, each one of 10 by 10 and two
+// corners of 10 bits, which are added up from their rows.  The rows take two
+// clocks: three sums of rows beside the multipliers, their sum in the clock
+// after, and the corner itself in the clock after that, when the product
+// stands ready; it is taken off in the last add, with the constants.
+//
 // Exponents: both zero is an integer multiply (no normalising shift, exponent
 // zero); exactly one zero gives an all-zero word; an operand exponent of 060000
 // or more, or an unshifted product exponent that reaches 060000, is a range
 // error; a product exponent below 020000 gives an all-zero word.
 
+// (the attribute has Quartus make every multiplication here in a DSP block)
+(* multstyle = "dsp" *)
 module fp_mul (
 	input  wire        clk,
 	input  wire [63:0] i_a,
@@ -47,54 +64,100 @@ module fp_mul (
 	localparam [1:0] K_FULL = 2'd0, K_HALF = 2'd1, K_ROUND = 2'd2, K_2M = 2'd3;
 
 	// ---- stage 1: the operands ----
-	reg [63:0] a, b;
-	reg [1:0] kind;
+	// (these registers stay where they are: retiming must not move the unit's
+	// first sums in front of them, onto the way the operands come)
+	(* dont_retime *) reg [63:0] a, b;
+	(* dont_retime *) reg [1:0] kind;
 	always @(posedge clk) begin
 		a    <= i_a;
 		b    <= i_b;
 		kind <= i_kind;
 	end
 
-	// ---- the pyramid: 48 rows in units of 2^-56, each cut off at the unit ----
+	// ---- the pyramid, in units of 2^-56 ----
 	wire [47:0] a_coef = a[47:0];
 	wire [47:0] b_coef = b[47:0];
-	wire [54:0] a_wide = {a_coef, 7'd0};
 
-	// row q (q = 1 is the most significant bit of b) is a_wide >> (q - 1)
-	function [55:0] row;
-		input [54:0] wide;
-		input [47:0] b;
-		input integer q;
+	// the corner of two 10-bit numbers: the products of bit i of x and bit j of
+	// y with i + j below 10.  Here the rows from to to of it: the rows of the
+	// bits of x with those numbers.
+	function [13:0] corner10;
+		input [9:0] x;
+		input [9:0] y;
+		input integer from;
+		input integer to;
+		integer        i;
+		reg     [13:0] sum;
+		reg     [ 9:0] low;
 		begin
-			row = b[48-q] ? {1'b0, wide >> (q - 1)} : 56'd0;
+			sum = 14'd0;
+			for (i = 0; i < 10; i = i + 1) begin
+				low = y & (10'h3FF >> i);
+				if ((i >= from) && (i <= to) && x[i]) sum = sum + ({4'd0, low} << i);
+			end
+			corner10 = sum;
 		end
 	endfunction
 
-	// stage 2: 48 rows to 16 sums
-	reg     [55:0] s2_sum[0:15];
-	integer        g;
-	always @(posedge clk)
-		for (g = 0; g < 16; g = g + 1)
-			s2_sum[g] <= row(
-				a_wide, b_coef, 3 * g + 1
-			) + row(
-				a_wide, b_coef, 3 * g + 2
-			) + row(
-				a_wide, b_coef, 3 * g + 3
-			);
-
-	// stage 3: 16 sums to 6
-	reg [55:0] s3_sum[0:5];
+	// stage 2: the multipliers
+	reg [47:0] p_hh, p_hl, p_lh, p_ll;  // A * B in four pieces
+	reg [39:0] m20;  // of the corner: the low 20 bits of each
+	reg [19:0] m10_a, m10_b;  // and of its two half corners, bits 39-20 of one and 19-0 of the other
+	// (of each corner of 10 bits: rows 0 to 3, 4 to 6 and 7 to 9)
+	reg [13:0] r_a0[0:2];
+	reg [13:0] r_a1[0:2];
+	reg [13:0] r_b0[0:2];
+	reg [13:0] r_b1[0:2];
 	always @(posedge clk) begin
-		for (g = 0; g < 5; g = g + 1) s3_sum[g] <= s2_sum[3*g] + s2_sum[3*g+1] + s2_sum[3*g+2];
-		s3_sum[5] <= s2_sum[15];
+		p_hh    <= a_coef[47:24] * b_coef[47:24];
+		p_hl    <= a_coef[47:24] * b_coef[23:0];
+		p_lh    <= a_coef[23:0] * b_coef[47:24];
+		p_ll    <= a_coef[23:0] * b_coef[23:0];
+		m20     <= a_coef[19:0] * b_coef[19:0];
+		m10_a   <= a_coef[29:20] * b_coef[9:0];
+		m10_b   <= a_coef[9:0] * b_coef[29:20];
+		r_a0[0] <= corner10(a_coef[39:30], b_coef[9:0], 0, 3);
+		r_a0[1] <= corner10(a_coef[39:30], b_coef[9:0], 4, 6);
+		r_a0[2] <= corner10(a_coef[39:30], b_coef[9:0], 7, 9);
+		r_a1[0] <= corner10(a_coef[29:20], b_coef[19:10], 0, 3);
+		r_a1[1] <= corner10(a_coef[29:20], b_coef[19:10], 4, 6);
+		r_a1[2] <= corner10(a_coef[29:20], b_coef[19:10], 7, 9);
+		r_b0[0] <= corner10(a_coef[19:10], b_coef[29:20], 0, 3);
+		r_b0[1] <= corner10(a_coef[19:10], b_coef[29:20], 4, 6);
+		r_b0[2] <= corner10(a_coef[19:10], b_coef[29:20], 7, 9);
+		r_b1[0] <= corner10(a_coef[9:0], b_coef[39:30], 0, 3);
+		r_b1[1] <= corner10(a_coef[9:0], b_coef[39:30], 4, 6);
+		r_b1[2] <= corner10(a_coef[9:0], b_coef[39:30], 7, 9);
 	end
 
-	// stage 4: 6 sums to 2
-	reg [55:0] s4_sum[0:1];
+	// stage 3: the product from bit 40 up, and the corners of 10 bits from
+	// their rows.  The pieces p_hh and p_ll do not overlap, so the product
+	// from bit 24 up is one sum of three.
+	wire [71:0] p_sum = {p_hh, p_ll[47:24]} + {24'd0, p_hl} + {24'd0, p_lh};
+	reg  [55:0] s3_product;
+	reg  [39:0] s3_m20;
+	reg [19:0] s3_m10_a, s3_m10_b;
+	reg [13:0] t10_a0, t10_a1, t10_b0, t10_b1;
 	always @(posedge clk) begin
-		s4_sum[0] <= s3_sum[0] + s3_sum[1] + s3_sum[2];
-		s4_sum[1] <= s3_sum[3] + s3_sum[4] + s3_sum[5];
+		s3_product <= p_sum[71:16];
+		s3_m20     <= m20;
+		s3_m10_a   <= m10_a;
+		s3_m10_b   <= m10_b;
+		t10_a0     <= r_a0[0] + r_a0[1] + r_a0[2];
+		t10_a1     <= r_a1[0] + r_a1[1] + r_a1[2];
+		t10_b0     <= r_b0[0] + r_b0[1] + r_b0[2];
+		t10_b1     <= r_b1[0] + r_b1[1] + r_b1[2];
+	end
+
+	// stage 4: what the corner takes from the product, which waits a clock
+	wire [24:0] half_a = {5'd0, s3_m10_a} + {{1'b0, t10_a0} + {1'b0, t10_a1}, 10'd0};
+	wire [24:0] half_b = {5'd0, s3_m10_b} + {{1'b0, t10_b0} + {1'b0, t10_b1}, 10'd0};
+	wire [45:0] corner = {6'd0, s3_m20} + {{1'b0, half_a} + {1'b0, half_b}, 20'd0};
+	reg  [55:0] s4_product;
+	reg  [ 5:0] s4_corner;
+	always @(posedge clk) begin
+		s4_product <= s3_product;
+		s4_corner  <= corner[45:40];
 	end
 
 	// ---- sign, kind and exponent beside the pyramid ----
@@ -157,24 +220,28 @@ module fp_mul (
 		c6_unf      <= c5_unf;
 	end
 
-	// stage 5: the last add, with the constants.  The compensation is 9; the round
+	// stage 5: the last add: the pyramid, which is the product less the corner,
+	// with the constants.  The compensation is 9; the round
 	// bits are 2^-50 and 2^-51 (066) or 2^-31 and 2^-32 (065).  For 067 the unit
-	// forms 198 minus the pyramid sum, which is ~x + ~y + 200.  That is what
-	// Cray's own simulation of the unit comes to (see TwoMinus::Cray in mul.rs):
-	// it adds one bits at 2^-2 to 2^-48 and 2^-51 + 2^-52 to the sum and its
-	// constant, then complements everything below 2^-1.
-	reg [55:0] s5_out;
-	reg [55:0] konst;
+	// forms 198 minus the pyramid sum, which is its complement and 199.  That is
+	// what Cray's own simulation of the unit comes to (see TwoMinus::Cray in
+	// mul.rs): it adds one bits at 2^-2 to 2^-48 and 2^-51 + 2^-52 to the sum and
+	// its constant, then complements everything below 2^-1.
+	// The corner comes off as its complement and one more, the one in the
+	// constant; under the complement of 067 it is added instead.
+	reg  [55:0] s5_out;
+	reg  [55:0] konst;
+	wire        two_minus = (c4_kind == K_2M);
 	always @(*) begin
 		case (c4_kind)
-			K_HALF:  konst = 56'd9 + (56'd1 << 25) + (56'd1 << 24);
-			K_ROUND: konst = 56'd9 + (56'd1 << 6) + (56'd1 << 5);
-			K_2M:    konst = 56'd200;
-			K_FULL:  konst = 56'd9;
+			K_HALF:  konst = 56'd10 + (56'd1 << 25) + (56'd1 << 24);
+			K_ROUND: konst = 56'd10 + (56'd1 << 6) + (56'd1 << 5);
+			K_2M:    konst = 56'd199;
+			K_FULL:  konst = 56'd10;
 		endcase
 	end
 	always @(posedge clk)
-		s5_out <= (c4_kind == K_2M) ? (~s4_sum[0] + ~s4_sum[1] + konst) : (s4_sum[0] + s4_sum[1] + konst);
+		s5_out <= (two_minus ? ~s4_product : s4_product) + konst + (two_minus ? {50'd0, s4_corner} : ~{50'd0, s4_corner});
 
 	// stage 6: normalise by at most one place, cut the half-precision result to 29
 	// bits, and take the exponent that goes with the shift

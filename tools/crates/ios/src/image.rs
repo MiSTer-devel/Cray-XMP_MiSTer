@@ -283,6 +283,25 @@ impl Tape {
         false
     }
 
+    /// The byte of a file that `poke` would change, if the file has it.
+    pub fn peek(&self, file: usize, mut offset: usize) -> Option<u8> {
+        let mut at = 0;
+        for item in self.items.iter() {
+            match item {
+                None => at += 1,
+                Some(_) if at < file => {}
+                Some(_) if at > file => return None,
+                Some(data) => {
+                    if offset < data.len() {
+                        return Some(data[offset]);
+                    }
+                    offset -= data.len();
+                }
+            }
+        }
+        None
+    }
+
     pub fn state(&self) -> TapeState {
         self.state
     }
